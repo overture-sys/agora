@@ -1,0 +1,11 @@
+[package]
+name = "agora-m18"
+description = "Agora's M18 hardware test tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+agora-device.workspace = true

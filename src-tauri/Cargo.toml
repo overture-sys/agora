@@ -1,0 +1,22 @@
+[package]
+name = "agora"
+description = "Agora: a free, open-source app for Stream Dock devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+agora-device.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Loads the built UI from inside the exe. The Tauri CLI turns this on for
+# release builds; pass it yourself when building with plain cargo.
+custom-protocol = ["tauri/custom-protocol"]

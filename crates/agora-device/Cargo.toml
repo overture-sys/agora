@@ -1,0 +1,18 @@
+[package]
+name = "agora-device"
+description = "Device layer for Agora: USB drivers for Stream Dock hardware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["hid"]
+# Real USB access. Off for pure unit tests of the protocol code.
+hid = ["dep:hidapi"]
+
+[dependencies]
+hidapi = { workspace = true, optional = true }
+image.workspace = true
+thiserror.workspace = true

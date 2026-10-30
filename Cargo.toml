@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/agora-device", "crates/agora-m18", "src-tauri"]
+members = ["crates/agora-device", "crates/agora-host", "crates/agora-m18", "src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["overture-sys"]
@@ -11,6 +11,7 @@ repository = "https://gitlab.com/overture-group1/agora"
 
 [workspace.dependencies]
 agora-device = { path = "crates/agora-device" }
+agora-host = { path = "crates/agora-host" }
 hidapi = { version = "2", default-features = false, features = ["windows-native", "linux-static-hidraw"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 thiserror = "2"

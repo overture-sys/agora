@@ -12,6 +12,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 agora-device.workspace = true
+agora-host.workspace = true
+base64 = "0.22"
+image.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

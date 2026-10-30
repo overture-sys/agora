@@ -1,0 +1,15 @@
+{
+  "SDKVersion": 1,
+  "Name": "Agora Test Plugin",
+  "Author": "Agora",
+  "Version": "1.0.0",
+  "Icon": "icon",
+  "CodePath": "plugin.js",
+  "PropertyInspectorPath": "pi/index.html",
+  "Nodejs": { "Version": "20" },
+  "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
+  "Actions": [
+    { "UUID": "com.agora.testplugin.counter", "Name": "Counter", "Icon": "icon",
+      "States": [{ "Image": "icon", "TitleAlignment": "middle", "FontSize": "14" }] }
+  ]
+}

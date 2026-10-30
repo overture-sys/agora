@@ -1,17 +1,26 @@
-// Agora app shell, phase 1: tray icon, dock connection with reconnect, and a
-// live test page. Profiles and the plugin host come in later phases.
+// Agora app shell: tray icon, dock connection with reconnect, and the plugin
+// host. Keys show what their plugins draw; presses go to the plugins.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agora_device::keyimage::{self, Orientation};
 use agora_device::worker::{Command, DockWorker, Event};
 use agora_device::{discover, Button, Control, Rgb};
+use agora_host::{face, manifest, ActionInfo, Config, DeviceDesc, HostEvent, HostHandle, KeyInfo, PluginInfo, Source};
+use base64::Engine;
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+/// M18 key image size, used for previews before a dock has connected.
+const KEY_SIZE: u32 = 64;
 
 /// The connected dock, if any. The connection thread fills and clears it.
 #[derive(Default)]
@@ -19,9 +28,17 @@ struct Dock {
     worker: Option<DockWorker>,
     model: Option<String>,
     orientation: Orientation,
+    /// The last connection message, for a window that opens later.
+    message: String,
 }
 
 type Shared = Arc<Mutex<Dock>>;
+
+/// The plugin host. Taken out and dropped on quit so plugins are stopped.
+type Host = Arc<Mutex<Option<HostHandle>>>;
+
+/// Latest preview of each key for the window, as PNG data URIs.
+type Previews = Arc<Mutex<HashMap<usize, String>>>;
 
 #[derive(Clone, Serialize)]
 struct Status {
@@ -40,6 +57,18 @@ struct Input {
     index: usize,
     pressed: bool,
     raw_id: u8,
+}
+
+#[derive(Clone, Serialize)]
+struct Preview {
+    key: usize,
+    image: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct PluginLine {
+    plugin: String,
+    message: String,
 }
 
 fn status(dock: &Dock, message: impl Into<String>) -> Status {
@@ -61,9 +90,15 @@ fn send(state: &State<Shared>, cmd: Command) -> Result<(), String> {
     }
 }
 
+fn with_host<T>(host: &State<Host>, f: impl FnOnce(&HostHandle) -> T) -> Result<T, String> {
+    let guard = host.lock().unwrap();
+    guard.as_ref().map(f).ok_or_else(|| "The plugin host isn't running".to_string())
+}
+
 #[tauri::command]
 fn dock_status(state: State<Shared>) -> Status {
-    status(&state.lock().unwrap(), "")
+    let dock = state.lock().unwrap();
+    status(&dock, dock.message.clone())
 }
 
 #[tauri::command]
@@ -84,44 +119,175 @@ fn ring_off(state: State<Shared>) -> Result<(), String> {
     send(&state, Command::RingReset)
 }
 
-/// Shows the orientation test face on every key.
 #[tauri::command]
-fn show_test_faces(state: State<Shared>) -> Result<(), String> {
-    let dock = state.lock().unwrap();
-    let w = dock.worker.as_ref().ok_or("No dock connected")?;
-    for key in 0..w.layout.key_count() {
-        let face = keyimage::orientation_face(w.layout.key_size, key);
-        let jpeg = keyimage::to_key_jpeg(&face, w.layout.key_size, dock.orientation).map_err(|e| e.to_string())?;
-        w.send(Command::SetKeyJpeg(key, jpeg));
+fn list_actions(host: State<Host>) -> Result<Vec<ActionInfo>, String> {
+    with_host(&host, |h| h.actions())
+}
+
+#[tauri::command]
+fn list_plugins(host: State<Host>) -> Result<Vec<PluginInfo>, String> {
+    with_host(&host, |h| h.plugins())
+}
+
+#[tauri::command]
+fn key_info(host: State<Host>, key: usize) -> Result<Option<KeyInfo>, String> {
+    with_host(&host, |h| h.key_info(key))
+}
+
+#[tauri::command]
+fn place_action(host: State<Host>, key: usize, plugin: String, action: String) -> Result<(), String> {
+    with_host(&host, |h| h.place(key, &plugin, &action))?
+}
+
+#[tauri::command]
+fn clear_key(host: State<Host>, key: usize) -> Result<(), String> {
+    with_host(&host, |h| h.clear(key))
+}
+
+#[tauri::command]
+fn key_previews(previews: State<Previews>) -> Vec<Preview> {
+    let map = previews.lock().unwrap();
+    map.iter().map(|(&key, image)| Preview { key, image: Some(image.clone()) }).collect()
+}
+
+/// Agora's data folder: %APPDATA%\Agora on Windows.
+fn data_dir(app: &AppHandle) -> PathBuf {
+    match std::env::var_os("APPDATA") {
+        Some(appdata) if cfg!(windows) => PathBuf::from(appdata).join("Agora"),
+        _ => app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("agora-data")),
     }
-    Ok(())
 }
 
-/// Puts up to two short lines of text on one key.
-#[tauri::command]
-fn set_key_text(state: State<Shared>, key: usize, text: String) -> Result<(), String> {
-    let dock = state.lock().unwrap();
-    let w = dock.worker.as_ref().ok_or("No dock connected")?;
-    let lines: Vec<&str> = text.lines().take(2).collect();
-    let face = keyimage::text_face(w.layout.key_size, [22, 30, 56], [232, 184, 64], &lines);
-    let jpeg = keyimage::to_key_jpeg(&face, w.layout.key_size, dock.orientation).map_err(|e| e.to_string())?;
-    w.send(Command::SetKeyJpeg(key, jpeg));
-    Ok(())
+/// Node.js for Node plugins: AGORA_NODE, then node\node.exe next to Agora,
+/// then whatever is on PATH (the host's default).
+fn find_node() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("AGORA_NODE").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let bundled = exe_dir.join("node").join(if cfg!(windows) { "node.exe" } else { "node" });
+    bundled.is_file().then_some(bundled)
 }
 
-#[tauri::command]
-fn clear_keys(state: State<Shared>) -> Result<(), String> {
-    send(&state, Command::ClearAll)
+fn start_host(app: &AppHandle) -> Result<(HostHandle, Receiver<HostEvent>), String> {
+    let data = data_dir(app);
+    let own = data.join("plugins");
+    let _ = std::fs::create_dir_all(&own);
+    let mut plugin_dirs = vec![(own, Source::Agora)];
+    if let Some(vsd) = manifest::vsd_craft_plugin_dir() {
+        // Read only: plugins installed for VSD Craft, used as they are.
+        plugin_dirs.push((vsd, Source::VsdCraft));
+    }
+    let config = Config {
+        plugin_dirs,
+        data_dir: data,
+        node: find_node(),
+        device: DeviceDesc { id: "M18".into(), name: "Stream Dock M18".into(), rows: 3, columns: 5 },
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    Ok((HostHandle::start(config, tx)?, rx))
 }
 
-/// Keeps a dock connected: finds it, opens it, forwards its events to the
-/// UI, and tries again every few seconds after it goes away.
-fn connection_loop(app: AppHandle, shared: Shared) {
+fn png_data_uri(img: &image::DynamicImage) -> Option<String> {
+    let mut png = Vec::new();
+    img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+    Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
+}
+
+/// Opens an http(s) address in the default browser. The host has already
+/// checked the scheme.
+fn open_url(url: &str) {
+    #[cfg(windows)]
+    let cmd = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(target_os = "macos")]
+    let cmd = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
+    let _ = cmd;
+}
+
+fn html_plugin_label(plugin: &str) -> String {
+    let safe: String = plugin.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    format!("plugin-{safe}")
+}
+
+/// Carries out what the host asks: key faces to the dock and the window,
+/// browser pages, HTML plugins, status and logs.
+fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Receiver<HostEvent>) {
+    for ev in events {
+        match ev {
+            HostEvent::Face { key, face: f } => {
+                let (size, orientation) = {
+                    let dock = shared.lock().unwrap();
+                    (dock.worker.as_ref().map_or(KEY_SIZE, |w| w.layout.key_size), dock.orientation)
+                };
+                let img = face::render(&f, size);
+                {
+                    let dock = shared.lock().unwrap();
+                    if let Some(w) = dock.worker.as_ref() {
+                        if key < w.layout.key_count() {
+                            if let Ok(jpeg) = keyimage::to_key_jpeg(&img, size, orientation) {
+                                w.send(Command::SetKeyJpeg(key, jpeg));
+                            }
+                        }
+                    }
+                }
+                let empty = f == face::Face::default();
+                let image = if empty { None } else { png_data_uri(&img) };
+                {
+                    let mut map = previews.lock().unwrap();
+                    match &image {
+                        Some(uri) => map.insert(key, uri.clone()),
+                        None => map.remove(&key),
+                    };
+                }
+                let _ = app.emit("key-preview", Preview { key, image });
+            }
+            HostEvent::OpenUrl(url) => open_url(&url),
+            HostEvent::StartHtmlPlugin { plugin, url } => {
+                let label = html_plugin_label(&plugin);
+                if app.get_webview_window(&label).is_none() {
+                    if let Ok(parsed) = url.parse() {
+                        let built = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
+                            .title(format!("Agora plugin {plugin}"))
+                            .visible(false)
+                            .skip_taskbar(true)
+                            .build();
+                        if let Err(e) = built {
+                            let _ = app.emit("plugin-log", PluginLine { plugin, message: format!("Couldn't start: {e}") });
+                        }
+                    }
+                }
+            }
+            HostEvent::StopHtmlPlugin { plugin } => {
+                if let Some(w) = app.get_webview_window(&html_plugin_label(&plugin)) {
+                    let _ = w.destroy();
+                }
+            }
+            HostEvent::PluginStatus { plugin, status } => {
+                let _ = app.emit("plugin-status", PluginLine { plugin, message: status });
+            }
+            HostEvent::Log { plugin, message } => {
+                let _ = app.emit("plugin-log", PluginLine { plugin, message });
+            }
+        }
+    }
+}
+
+/// Keeps a dock connected: finds it, opens it, forwards its events, and
+/// tries again every few seconds after it goes away.
+fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
     let mut last_message = String::new();
-    let mut report = |app: &AppHandle, dock: &Dock, msg: String| {
+    let mut report = |app: &AppHandle, dock: &mut Dock, msg: String| {
+        dock.message = msg.clone();
         if msg != last_message {
             let _ = app.emit("dock-status", status(dock, msg.clone()));
             last_message = msg;
+        }
+    };
+    let tell_host = |f: &dyn Fn(&HostHandle)| {
+        if let Some(h) = host.lock().unwrap().as_ref() {
+            f(h);
         }
     };
     loop {
@@ -138,28 +304,34 @@ fn connection_loop(app: AppHandle, shared: Shared) {
                     let mut dock = shared.lock().unwrap();
                     dock.worker = Some(worker);
                     dock.model = Some(model.clone());
-                    report(&app, &dock, format!("{model} connected"));
+                    report(&app, &mut dock, format!("{model} connected"));
                 }
-                forward_events(&app, events);
+                // Put every key's face back on the freshly opened dock.
+                tell_host(&|h| {
+                    h.device_connected(true);
+                    h.redraw_all();
+                });
+                forward_events(&app, &host, events);
+                tell_host(&|h| h.device_connected(false));
                 let mut dock = shared.lock().unwrap();
                 dock.worker = None;
-                report(&app, &dock, format!("{model} disconnected. Looking for it again..."));
+                report(&app, &mut dock, format!("{model} disconnected. Looking for it again..."));
             }
             Err(agora_device::Error::Disconnected) => {
-                let dock = shared.lock().unwrap();
-                report(&app, &dock, "No dock found. Plug in the M18 and close VSD Craft.".into());
+                let mut dock = shared.lock().unwrap();
+                report(&app, &mut dock, "No dock found. Plug in the M18 and close VSD Craft.".into());
             }
             Err(e) => {
-                let dock = shared.lock().unwrap();
-                report(&app, &dock, e.to_string());
+                let mut dock = shared.lock().unwrap();
+                report(&app, &mut dock, e.to_string());
             }
         }
         std::thread::sleep(Duration::from_secs(3));
     }
 }
 
-/// Sends dock input to the UI until the worker stops.
-fn forward_events(app: &AppHandle, events: std::sync::mpsc::Receiver<Event>) {
+/// Sends dock input to the plugins and the window until the worker stops.
+fn forward_events(app: &AppHandle, host: &Host, events: Receiver<Event>) {
     for ev in events {
         match ev {
             Event::Input(i) => {
@@ -170,6 +342,11 @@ fn forward_events(app: &AppHandle, events: std::sync::mpsc::Receiver<Event>) {
                     Control::Button(Button::Right) => ("button", 2),
                     Control::Unknown(_) => ("unknown", 0),
                 };
+                if kind == "key" {
+                    if let Some(h) = host.lock().unwrap().as_ref() {
+                        h.key(index, i.pressed);
+                    }
+                }
                 let _ = app.emit("dock-input", Input { kind, index, pressed: i.pressed, raw_id: i.raw_id });
             }
             Event::Error(e) => {
@@ -182,17 +359,24 @@ fn forward_events(app: &AppHandle, events: std::sync::mpsc::Receiver<Event>) {
 
 fn main() {
     let shared: Shared = Arc::default();
+    let host: Host = Arc::default();
+    let previews: Previews = Arc::default();
 
     tauri::Builder::default()
         .manage(shared.clone())
+        .manage(host.clone())
+        .manage(previews.clone())
         .invoke_handler(tauri::generate_handler![
             dock_status,
             set_brightness,
             set_ring,
             ring_off,
-            show_test_faces,
-            set_key_text,
-            clear_keys
+            list_actions,
+            list_plugins,
+            key_info,
+            place_action,
+            clear_key,
+            key_previews
         ])
         .setup(move |app| {
             let show = MenuItem::with_id(app, "show", "Show Agora", true, None::<&str>)?;
@@ -210,7 +394,10 @@ fn main() {
                         }
                     }
                     "quit" => {
-                        // Dropping the worker hands the dock back to its stock screen.
+                        // Stop the plugins and save, then hand the dock back
+                        // to its stock screen by dropping the worker.
+                        let stopped = app.state::<Host>().lock().unwrap().take();
+                        drop(stopped);
                         app.state::<Shared>().lock().unwrap().worker = None;
                         app.exit(0);
                     }
@@ -219,17 +406,30 @@ fn main() {
                 .build(app)?;
 
             let handle = app.handle().clone();
-            let shared = shared.clone();
+            match start_host(&handle) {
+                Ok((h, events)) => {
+                    *host.lock().unwrap() = Some(h);
+                    let (handle, shared, previews) = (handle.clone(), shared.clone(), previews.clone());
+                    std::thread::Builder::new()
+                        .name("agora-host-events".into())
+                        .spawn(move || host_events(handle, shared, previews, events))?;
+                }
+                Err(e) => eprintln!("plugin host didn't start: {e}"),
+            }
+
+            let (handle, shared, host) = (app.handle().clone(), shared.clone(), host.clone());
             std::thread::Builder::new()
                 .name("agora-connect".into())
-                .spawn(move || connection_loop(handle, shared))?;
+                .spawn(move || connection_loop(handle, shared, host))?;
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window keeps Agora running in the tray.
+            // Closing the main window keeps Agora running in the tray.
             if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .run(tauri::generate_context!())

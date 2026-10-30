@@ -2,6 +2,8 @@
 // host. Keys show what their plugins draw; presses go to the plugins.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod system;
+
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -12,7 +14,10 @@ use std::time::Duration;
 use agora_device::keyimage::{self, Orientation};
 use agora_device::worker::{Command, DockWorker, Event};
 use agora_device::{discover, Button, Control, Rgb};
-use agora_host::{face, manifest, ActionInfo, Config, DeviceDesc, HostEvent, HostHandle, KeyInfo, PluginInfo, Source};
+use agora_host::{
+    face, manifest, ActionInfo, Config, DeviceDesc, HostEvent, HostHandle, KeyInfo, LayoutOp,
+    LayoutView, Look, PluginInfo, Source,
+};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -49,7 +54,10 @@ impl Default for Settings {
 }
 
 fn load_settings(path: &std::path::Path) -> Settings {
-    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
 }
 
 fn save_settings(path: &std::path::Path, settings: &Settings) {
@@ -101,7 +109,11 @@ impl Default for Dock {
 
 impl Dock {
     /// Changes a setting, saves it, and sends `cmd` if a dock is connected.
-    fn change(&mut self, edit: impl FnOnce(&mut Settings), cmds: Vec<Command>) -> Result<(), String> {
+    fn change(
+        &mut self,
+        edit: impl FnOnce(&mut Settings),
+        cmds: Vec<Command>,
+    ) -> Result<(), String> {
         edit(&mut self.settings);
         save_settings(&self.settings_path, &self.settings);
         match &self.worker {
@@ -168,7 +180,10 @@ fn status(dock: &Dock, message: impl Into<String>) -> Status {
 
 fn with_host<T>(host: &State<Host>, f: impl FnOnce(&HostHandle) -> T) -> Result<T, String> {
     let guard = host.lock().unwrap();
-    guard.as_ref().map(f).ok_or_else(|| "The plugin host isn't running".to_string())
+    guard
+        .as_ref()
+        .map(f)
+        .ok_or_else(|| "The plugin host isn't running".to_string())
 }
 
 #[tauri::command]
@@ -179,7 +194,10 @@ fn dock_status(state: State<Shared>) -> Status {
 
 #[tauri::command]
 fn set_brightness(state: State<Shared>, percent: u8) -> Result<(), String> {
-    state.lock().unwrap().change(|s| s.brightness = percent.min(100), vec![Command::Brightness(percent)])
+    state.lock().unwrap().change(
+        |s| s.brightness = percent.min(100),
+        vec![Command::Brightness(percent)],
+    )
 }
 
 #[tauri::command]
@@ -192,7 +210,10 @@ fn get_settings(state: State<Shared>) -> Settings {
 fn set_ring(state: State<Shared>, color: String) -> Result<(), String> {
     let mut dock = state.lock().unwrap();
     let level = dock.settings.ring_brightness;
-    let cmds = vec![Command::Ring(vec![hex_rgb(&color); 24]), Command::RingBrightness(level)];
+    let cmds = vec![
+        Command::Ring(vec![hex_rgb(&color); 24]),
+        Command::RingBrightness(level),
+    ];
     dock.change(
         |s| {
             s.ring_color = color.clone();
@@ -206,19 +227,31 @@ fn set_ring(state: State<Shared>, color: String) -> Result<(), String> {
 fn set_ring_brightness(state: State<Shared>, percent: u8) -> Result<(), String> {
     let percent = percent.min(100);
     let mut dock = state.lock().unwrap();
-    let cmds = if dock.settings.ring_on { vec![Command::RingBrightness(percent)] } else { vec![] };
+    let cmds = if dock.settings.ring_on {
+        vec![Command::RingBrightness(percent)]
+    } else {
+        vec![]
+    };
     dock.change(|s| s.ring_brightness = percent, cmds)
 }
 
 #[tauri::command]
 fn ring_off(state: State<Shared>) -> Result<(), String> {
-    state.lock().unwrap().change(|s| s.ring_on = false, vec![Command::RingOff])
+    state
+        .lock()
+        .unwrap()
+        .change(|s| s.ring_on = false, vec![Command::RingOff])
 }
 
 /// Turns loading VSD Craft's plugins on or off, then restarts the plugin
 /// host so the list matches.
 #[tauri::command]
-fn set_use_vsd_craft_plugins(app: AppHandle, state: State<Shared>, host: State<Host>, on: bool) -> Result<(), String> {
+fn set_use_vsd_craft_plugins(
+    app: AppHandle,
+    state: State<Shared>,
+    host: State<Host>,
+    on: bool,
+) -> Result<(), String> {
     {
         let mut dock = state.lock().unwrap();
         dock.settings.use_vsd_craft_plugins = on;
@@ -243,7 +276,12 @@ fn key_info(host: State<Host>, key: usize) -> Result<Option<KeyInfo>, String> {
 }
 
 #[tauri::command]
-fn place_action(host: State<Host>, key: usize, plugin: String, action: String) -> Result<(), String> {
+fn place_action(
+    host: State<Host>,
+    key: usize,
+    plugin: String,
+    action: String,
+) -> Result<(), String> {
     with_host(&host, |h| h.place(key, &plugin, &action))?
 }
 
@@ -258,27 +296,143 @@ fn move_key(host: State<Host>, from: usize, to: usize) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_layout(host: State<Host>) -> Result<Option<LayoutView>, String> {
+    with_host(&host, |h| h.layout())
+}
+
+/// Profile and page changes from the editor. `id` is the page or profile.
+#[tauri::command]
+fn layout_op(
+    host: State<Host>,
+    op: String,
+    id: Option<String>,
+    name: Option<String>,
+) -> Result<(), String> {
+    let id = id.unwrap_or_default();
+    let name = name.unwrap_or_default();
+    let op = match op.as_str() {
+        "go-to-page" => LayoutOp::GoToPage(id),
+        "add-page" => LayoutOp::AddPage,
+        "remove-page" => LayoutOp::RemovePage(id),
+        "rename-page" => LayoutOp::RenamePage(id, name),
+        "add-profile" => LayoutOp::AddProfile(name),
+        "remove-profile" => LayoutOp::RemoveProfile(id),
+        "rename-profile" => LayoutOp::RenameProfile(id, name),
+        "switch-profile" => LayoutOp::SwitchProfile(id),
+        other => return Err(format!("unknown change {other}")),
+    };
+    with_host(&host, |h| h.layout_op(op))?
+}
+
+#[tauri::command]
+fn set_key_settings(
+    host: State<Host>,
+    key: usize,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    with_host(&host, |h| h.set_settings(key, settings))
+}
+
+#[tauri::command]
+fn set_key_look(host: State<Host>, key: usize, look: Look) -> Result<(), String> {
+    with_host(&host, |h| h.set_look(key, look))
+}
+
+/// Brightness and light ring keys: change the dock's saved settings.
+fn run_dock_action(
+    app: &AppHandle,
+    shared: &Shared,
+    action: &str,
+    settings: &serde_json::Value,
+) -> Result<(), String> {
+    let mut dock = shared.lock().unwrap();
+    let cur = dock.settings.clone();
+    let mode = settings.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    let result = if action == "brightness" {
+        let value = settings
+            .get("value")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .min(100) as u8;
+        let level = match mode {
+            "down" => cur.brightness.saturating_sub(10),
+            "set" => value,
+            _ => cur.brightness.saturating_add(10).min(100),
+        };
+        dock.change(|s| s.brightness = level, vec![Command::Brightness(level)])
+    } else {
+        let color = settings
+            .get("color")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&cur.ring_color)
+            .to_string();
+        let on = match mode {
+            "on" | "color" => true,
+            "off" => false,
+            _ => !cur.ring_on,
+        };
+        let color = if mode == "color" {
+            color
+        } else {
+            cur.ring_color.clone()
+        };
+        let cmds = if on {
+            vec![
+                Command::Ring(vec![hex_rgb(&color); 24]),
+                Command::RingBrightness(cur.ring_brightness),
+            ]
+        } else {
+            vec![Command::RingOff]
+        };
+        dock.change(
+            |s| {
+                s.ring_on = on;
+                s.ring_color = color.clone();
+            },
+            cmds,
+        )
+    };
+    drop(dock);
+    let _ = app.emit("settings-changed", ());
+    result
+}
+
+#[tauri::command]
 fn key_previews(previews: State<Previews>) -> Vec<Preview> {
     let map = previews.lock().unwrap();
-    map.iter().map(|(&key, image)| Preview { key, image: Some(image.clone()) }).collect()
+    map.iter()
+        .map(|(&key, image)| Preview {
+            key,
+            image: Some(image.clone()),
+        })
+        .collect()
 }
 
 /// Agora's data folder: %APPDATA%\Agora on Windows.
 fn data_dir(app: &AppHandle) -> PathBuf {
     match std::env::var_os("APPDATA") {
         Some(appdata) if cfg!(windows) => PathBuf::from(appdata).join("Agora"),
-        _ => app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("agora-data")),
+        _ => app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("agora-data")),
     }
 }
 
 /// Node.js for Node plugins: AGORA_NODE, then node\node.exe next to Agora,
 /// then node on PATH, then the Node 20 that VSD Craft ships.
 fn find_node() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("AGORA_NODE").map(PathBuf::from).filter(|p| p.is_file()) {
+    if let Some(p) = std::env::var_os("AGORA_NODE")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
         return Some(p);
     }
     let exe = if cfg!(windows) { "node.exe" } else { "node" };
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("node"))) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("node")))
+    {
         if dir.join(exe).is_file() {
             return Some(dir.join(exe));
         }
@@ -291,11 +445,19 @@ fn find_node() -> Option<PathBuf> {
         return None;
     }
     std::env::var_os("ProgramFiles(x86)")
-        .map(|pf| PathBuf::from(pf).join("VSD Craft").join("node").join("node20.exe"))
+        .map(|pf| {
+            PathBuf::from(pf)
+                .join("VSD Craft")
+                .join("node")
+                .join("node20.exe")
+        })
         .filter(|p| p.is_file())
 }
 
-fn start_host(app: &AppHandle, use_vsd_craft: bool) -> Result<(HostHandle, Receiver<HostEvent>), String> {
+fn start_host(
+    app: &AppHandle,
+    use_vsd_craft: bool,
+) -> Result<(HostHandle, Receiver<HostEvent>), String> {
     let data = data_dir(app);
     let own = data.join("plugins");
     let _ = std::fs::create_dir_all(&own);
@@ -308,14 +470,24 @@ fn start_host(app: &AppHandle, use_vsd_craft: bool) -> Result<(HostHandle, Recei
         plugin_dirs,
         data_dir: data,
         node: find_node(),
-        device: DeviceDesc { id: "M18".into(), name: "Stream Dock M18".into(), rows: 3, columns: 5 },
+        device: DeviceDesc {
+            id: "M18".into(),
+            name: "Stream Dock M18".into(),
+            rows: 3,
+            columns: 5,
+        },
     };
     let (tx, rx) = std::sync::mpsc::channel();
     Ok((HostHandle::start(config, tx)?, rx))
 }
 
 /// Starts the plugin host (stopping a running one first) and its event thread.
-fn restart_host(app: &AppHandle, host: &Host, shared: &Shared, previews: &Previews) -> Result<(), String> {
+fn restart_host(
+    app: &AppHandle,
+    host: &Host,
+    shared: &Shared,
+    previews: &Previews,
+) -> Result<(), String> {
     let old = host.lock().unwrap().take();
     drop(old);
     previews.lock().unwrap().clear();
@@ -336,15 +508,21 @@ fn restart_host(app: &AppHandle, host: &Host, shared: &Shared, previews: &Previe
 
 fn png_data_uri(img: &image::DynamicImage) -> Option<String> {
     let mut png = Vec::new();
-    img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
-    Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
+    img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png)
+    ))
 }
 
 /// Opens an http(s) address in the default browser. The host has already
 /// checked the scheme.
 fn open_url(url: &str) {
     #[cfg(windows)]
-    let cmd = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    let cmd = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
     #[cfg(target_os = "macos")]
     let cmd = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -368,7 +546,10 @@ fn open_folder(dir: &std::path::Path) -> Result<(), String> {
 
 fn plugin_dir(host: &State<Host>, uuid: &str) -> Result<(PathBuf, String), String> {
     let plugins = with_host(host, |h| h.plugins())?;
-    let p = plugins.into_iter().find(|p| p.uuid == uuid).ok_or("That plugin isn't loaded")?;
+    let p = plugins
+        .into_iter()
+        .find(|p| p.uuid == uuid)
+        .ok_or("That plugin isn't loaded")?;
     Ok((PathBuf::from(p.dir), p.source))
 }
 
@@ -393,7 +574,8 @@ fn remove_plugin(host: State<Host>, uuid: String) -> Result<String, String> {
         return Ok("hidden".into());
     }
     with_host(&host, |h| h.forget(&uuid))?;
-    trash::delete(&dir).map_err(|e| format!("Agora stopped the plugin but couldn't delete its folder: {e}"))?;
+    trash::delete(&dir)
+        .map_err(|e| format!("Agora stopped the plugin but couldn't delete its folder: {e}"))?;
     Ok("deleted".into())
 }
 
@@ -403,7 +585,10 @@ fn show_plugin(host: State<Host>, uuid: String) -> Result<(), String> {
 }
 
 fn html_plugin_label(plugin: &str) -> String {
-    let safe: String = plugin.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let safe: String = plugin
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     format!("plugin-{safe}")
 }
 
@@ -415,7 +600,10 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
             HostEvent::Face { key, face: f } => {
                 let (size, orientation) = {
                     let dock = shared.lock().unwrap();
-                    (dock.worker.as_ref().map_or(KEY_SIZE, |w| w.layout.key_size), dock.orientation)
+                    (
+                        dock.worker.as_ref().map_or(KEY_SIZE, |w| w.layout.key_size),
+                        dock.orientation,
+                    )
                 };
                 let img = face::render(&f, size);
                 {
@@ -444,13 +632,20 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
                 let label = html_plugin_label(&plugin);
                 if app.get_webview_window(&label).is_none() {
                     if let Ok(parsed) = url.parse() {
-                        let built = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
-                            .title(format!("Agora plugin {plugin}"))
-                            .visible(false)
-                            .skip_taskbar(true)
-                            .build();
+                        let built =
+                            WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
+                                .title(format!("Agora plugin {plugin}"))
+                                .visible(false)
+                                .skip_taskbar(true)
+                                .build();
                         if let Err(e) = built {
-                            let _ = app.emit("plugin-log", PluginLine { plugin, message: format!("Couldn't start: {e}") });
+                            let _ = app.emit(
+                                "plugin-log",
+                                PluginLine {
+                                    plugin,
+                                    message: format!("Couldn't start: {e}"),
+                                },
+                            );
                         }
                     }
                 }
@@ -461,10 +656,34 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
                 }
             }
             HostEvent::PluginStatus { plugin, status } => {
-                let _ = app.emit("plugin-status", PluginLine { plugin, message: status });
+                let _ = app.emit(
+                    "plugin-status",
+                    PluginLine {
+                        plugin,
+                        message: status,
+                    },
+                );
             }
             HostEvent::Log { plugin, message } => {
                 let _ = app.emit("plugin-log", PluginLine { plugin, message });
+            }
+            HostEvent::PageChanged => {
+                let _ = app.emit("page-changed", ());
+            }
+            HostEvent::Run { action, settings } => {
+                let result = match action.as_str() {
+                    "brightness" | "ring" => run_dock_action(&app, &shared, &action, &settings),
+                    _ => system::run(&action, &settings, open_url),
+                };
+                if let Err(message) = result {
+                    let _ = app.emit(
+                        "plugin-log",
+                        PluginLine {
+                            plugin: "Agora".into(),
+                            message,
+                        },
+                    );
+                }
             }
         }
     }
@@ -512,11 +731,19 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
                 tell_host(&|h| h.device_connected(false));
                 let mut dock = shared.lock().unwrap();
                 dock.worker = None;
-                report(&app, &mut dock, format!("{model} disconnected. Looking for it again..."));
+                report(
+                    &app,
+                    &mut dock,
+                    format!("{model} disconnected. Looking for it again..."),
+                );
             }
             Err(agora_device::Error::Disconnected) => {
                 let mut dock = shared.lock().unwrap();
-                report(&app, &mut dock, "No dock found. Plug in the M18 and close VSD Craft.".into());
+                report(
+                    &app,
+                    &mut dock,
+                    "No dock found. Plug in the M18 and close VSD Craft.".into(),
+                );
             }
             Err(e) => {
                 let mut dock = shared.lock().unwrap();
@@ -544,7 +771,15 @@ fn forward_events(app: &AppHandle, host: &Host, events: Receiver<Event>) {
                         h.key(index, i.pressed);
                     }
                 }
-                let _ = app.emit("dock-input", Input { kind, index, pressed: i.pressed, raw_id: i.raw_id });
+                let _ = app.emit(
+                    "dock-input",
+                    Input {
+                        kind,
+                        index,
+                        pressed: i.pressed,
+                        raw_id: i.raw_id,
+                    },
+                );
             }
             Event::Error(e) => {
                 let _ = app.emit("dock-error", e);
@@ -560,6 +795,7 @@ fn main() {
     let previews: Previews = Arc::default();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(shared.clone())
         .manage(host.clone())
         .manage(previews.clone())
@@ -581,11 +817,16 @@ fn main() {
             open_plugin_folder,
             remove_plugin,
             show_plugin,
-            key_previews
+            key_previews,
+            get_layout,
+            layout_op,
+            set_key_settings,
+            set_key_look
         ])
         .setup(move |app| {
             let show = MenuItem::with_id(app, "show", "Show Agora", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit (give the dock back)", true, None::<&str>)?;
+            let quit =
+                MenuItem::with_id(app, "quit", "Quit (give the dock back)", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().expect("app icon"))

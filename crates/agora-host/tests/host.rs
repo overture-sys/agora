@@ -7,17 +7,24 @@ use std::process::Command;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use agora_host::{Config, DeviceDesc, HostEvent, HostHandle, Overlay, Source};
+use agora_host::{
+    builtin, Config, DeviceDesc, HostEvent, HostHandle, LayoutOp, Look, Overlay, Source,
+};
 
 fn node_ok() -> bool {
     Command::new("node")
-        .args(["-e", "process.exit(typeof WebSocket === 'function' ? 0 : 1)"])
+        .args([
+            "-e",
+            "process.exit(typeof WebSocket === 'function' ? 0 : 1)",
+        ])
         .status()
         .is_ok_and(|s| s.success())
 }
 
 fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
 }
 
 fn start(data: &std::path::Path) -> (HostHandle, Receiver<HostEvent>) {
@@ -26,13 +33,22 @@ fn start(data: &std::path::Path) -> (HostHandle, Receiver<HostEvent>) {
         plugin_dirs: vec![(fixtures(), Source::Agora)],
         data_dir: data.to_path_buf(),
         node: None,
-        device: DeviceDesc { id: "TEST-M18".into(), name: "Stream Dock M18".into(), rows: 3, columns: 5 },
+        device: DeviceDesc {
+            id: "TEST-M18".into(),
+            name: "Stream Dock M18".into(),
+            rows: 3,
+            columns: 5,
+        },
     };
     (HostHandle::start(config, tx).unwrap(), rx)
 }
 
 /// Waits for an event matching `pred`, failing after `secs`.
-fn wait_for(rx: &Receiver<HostEvent>, secs: u64, mut pred: impl FnMut(&HostEvent) -> bool) -> HostEvent {
+fn wait_for(
+    rx: &Receiver<HostEvent>,
+    secs: u64,
+    mut pred: impl FnMut(&HostEvent) -> bool,
+) -> HostEvent {
     let end = Instant::now() + Duration::from_secs(secs);
     let mut seen = Vec::new();
     while Instant::now() < end {
@@ -46,9 +62,21 @@ fn wait_for(rx: &Receiver<HostEvent>, secs: u64, mut pred: impl FnMut(&HostEvent
     panic!("event not seen; got:\n{}", seen.join("\n"));
 }
 
+/// The test plugin's actions (the list also holds Agora's own).
+fn plugin_actions(host: &HostHandle) -> Vec<agora_host::ActionInfo> {
+    host.actions()
+        .into_iter()
+        .filter(|a| a.plugin != builtin::PLUGIN)
+        .collect()
+}
+
 fn http_get(port: u16, path_and_query: &str) -> String {
     let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(s, "GET {path_and_query} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+    write!(
+        s,
+        "GET {path_and_query} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
     out
@@ -64,31 +92,62 @@ fn node_plugin_round_trip() {
     let (host, rx) = start(data.path());
     host.device_connected(true);
 
-    let actions = host.actions();
+    let actions = plugin_actions(&host);
     assert_eq!(actions.len(), 1);
-    assert!(actions[0].icon.as_deref().unwrap_or("").starts_with("data:image/png;base64,"));
+    assert!(actions[0]
+        .icon
+        .as_deref()
+        .unwrap_or("")
+        .starts_with("data:image/png;base64,"));
 
-    host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter").unwrap();
+    host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .unwrap();
     // The manifest face first, then the plugin's title after willAppear.
-    wait_for(&rx, 10, |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello" && face.image.is_some()));
+    wait_for(
+        &rx,
+        10,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello" && face.image.is_some()),
+    );
 
     host.key(0, true);
     host.key(0, false);
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 0, face } if face.overlay == Overlay::Ok));
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "n=1"));
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.overlay == Overlay::Ok),
+    );
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "n=1"),
+    );
 
     // Settings panel: the page is served with the connect script added.
     let info = host.key_info(0).unwrap();
     let url = info.settings_url.unwrap();
-    let path = url.split_once(&format!("127.0.0.1:{}", host.port)).unwrap().1;
+    let path = url
+        .split_once(&format!("127.0.0.1:{}", host.port))
+        .unwrap()
+        .1;
     let page = http_get(host.port, path);
     assert!(page.contains("200 OK"), "{page}");
     assert!(page.contains("connectElgatoStreamDeckSocket||window.connectSDSocket"));
     // No escaping the plugin folder.
-    assert!(http_get(host.port, "/plugin/com.agora.testplugin/..%2F..%2FCargo.toml").contains("404"));
+    assert!(http_get(
+        host.port,
+        "/plugin/com.agora.testplugin/..%2F..%2FCargo.toml"
+    )
+    .contains("404"));
 
     // Settings panel round trip over the socket: sendToPlugin -> sendToPropertyInspector.
-    let context = url.split("uuid=").nth(1).unwrap().split('&').next().unwrap().to_string();
+    let context = url
+        .split("uuid=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_string();
     let script = format!(
         "const ws=new WebSocket('ws://127.0.0.1:{port}');\
          ws.onopen=()=>{{ws.send(JSON.stringify({{event:'registerPropertyInspector',uuid:'{context}'}}));\
@@ -98,8 +157,15 @@ fn node_plugin_round_trip() {
         port = host.port
     );
     let out = Command::new("node").args(["-e", &script]).output().unwrap();
-    assert!(out.status.success(), "PI script failed: {}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), r#"{"echo":{"hi":1}}"#);
+    assert!(
+        out.status.success(),
+        "PI script failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        r#"{"echo":{"hi":1}}"#
+    );
 
     // Settings and global settings are saved to the layout file.
     std::thread::sleep(Duration::from_millis(1500));
@@ -109,7 +175,11 @@ fn node_plugin_round_trip() {
 
     // Removing the last key stops the plugin.
     host.clear(0);
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::PluginStatus { status, .. } if status == "stopped"));
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::PluginStatus { status, .. } if status == "stopped"),
+    );
     drop(host);
 }
 
@@ -121,12 +191,21 @@ fn layout_survives_restart() {
     let data = tempfile::tempdir().unwrap();
     {
         let (host, rx) = start(data.path());
-        host.place(4, "com.agora.testplugin", "com.agora.testplugin.counter").unwrap();
-        wait_for(&rx, 10, |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "hello"));
+        host.place(4, "com.agora.testplugin", "com.agora.testplugin.counter")
+            .unwrap();
+        wait_for(
+            &rx,
+            10,
+            |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "hello"),
+        );
     }
     let (host, rx) = start(data.path());
     // The plugin is started again for the saved key, and draws it.
-    wait_for(&rx, 10, |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "hello"));
+    wait_for(
+        &rx,
+        10,
+        |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "hello"),
+    );
     assert_eq!(host.key_info(4).unwrap().name, "Counter");
 }
 
@@ -137,27 +216,56 @@ fn moving_a_key_keeps_the_action_and_swaps() {
     }
     let data = tempfile::tempdir().unwrap();
     let (host, rx) = start(data.path());
-    host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter").unwrap();
-    wait_for(&rx, 10, |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello"));
+    host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .unwrap();
+    wait_for(
+        &rx,
+        10,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello"),
+    );
     let context = host.key_info(0).unwrap().settings_url.unwrap();
 
     // Onto an empty key: the old key goes blank and the plugin redraws the new one.
     host.move_key(0, 3);
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 0, face } if face.image.is_none() && face.title.is_empty()));
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 3, face } if face.title == "hello"));
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.image.is_none() && face.title.is_empty()),
+    );
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 3, face } if face.title == "hello"),
+    );
     assert!(host.key_info(0).is_none());
     let moved = host.key_info(3).unwrap().settings_url.unwrap();
-    let ctx = |u: &str| u.split("uuid=").nth(1).unwrap().split('&').next().unwrap().to_string();
+    let ctx = |u: &str| {
+        u.split("uuid=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string()
+    };
     assert_eq!(ctx(&context), ctx(&moved), "same action instance");
     host.key(3, true);
     host.key(3, false);
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 3, face } if face.title == "n=1"));
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 3, face } if face.title == "n=1"),
+    );
 
     // Onto a used key: the two swap.
-    host.place(1, "com.agora.testplugin", "com.agora.testplugin.counter").unwrap();
+    host.place(1, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .unwrap();
     host.move_key(3, 1);
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(ctx(&host.key_info(1).unwrap().settings_url.unwrap()), ctx(&moved));
+    assert_eq!(
+        ctx(&host.key_info(1).unwrap().settings_url.unwrap()),
+        ctx(&moved)
+    );
     assert!(host.key_info(3).is_some());
 }
 
@@ -168,21 +276,173 @@ fn hiding_and_forgetting_plugins() {
     }
     let data = tempfile::tempdir().unwrap();
     let (host, rx) = start(data.path());
-    host.place(2, "com.agora.testplugin", "com.agora.testplugin.counter").unwrap();
-    wait_for(&rx, 10, |e| matches!(e, HostEvent::Face { key: 2, face } if face.title == "hello"));
+    host.place(2, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .unwrap();
+    wait_for(
+        &rx,
+        10,
+        |e| matches!(e, HostEvent::Face { key: 2, face } if face.title == "hello"),
+    );
 
     // Hiding clears its keys and takes its actions out of the list.
     host.set_hidden("com.agora.testplugin", true);
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::PluginStatus { status, .. } if status == "stopped"));
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::PluginStatus { status, .. } if status == "stopped"),
+    );
     assert!(host.key_info(2).is_none());
-    assert!(host.actions().is_empty());
+    assert!(plugin_actions(&host).is_empty());
     assert!(host.plugins()[0].hidden);
     host.set_hidden("com.agora.testplugin", false);
-    assert_eq!(host.actions().len(), 1);
+    assert_eq!(plugin_actions(&host).len(), 1);
 
     // Forgetting drops it and hands back its folder.
     let dir = host.forget("com.agora.testplugin").unwrap();
     assert!(dir.ends_with("com.agora.testplugin.sdPlugin"));
     assert!(host.plugins().is_empty());
-    assert!(host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter").is_err());
+    assert!(host
+        .place(0, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .is_err());
+}
+
+#[test]
+fn old_layouts_carry_over_to_the_first_page() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(
+        data.path().join("layout.json"),
+        r#"{"keys":{"3":{"context":"ABC","plugin":"com.agora.builtin","action":"website","settings":{"url":"https://example.com"}}}}"#,
+    )
+    .unwrap();
+    let (host, _rx) = start(data.path());
+    let view = host.layout().unwrap();
+    assert_eq!(view.profiles.len(), 1);
+    assert_eq!(view.pages.len(), 1);
+    assert_eq!(
+        host.key_info(3).unwrap().settings["url"],
+        "https://example.com"
+    );
+}
+
+#[test]
+fn pages_folders_and_profiles() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.place(0, builtin::PLUGIN, "website").unwrap();
+    let first = host.layout().unwrap().page;
+
+    // A second page starts empty; next/previous wrap round.
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    let view = host.layout().unwrap();
+    assert_eq!(view.pages.len(), 2);
+    assert_ne!(view.page, first);
+    assert!(host.key_info(0).is_none());
+    host.place(1, builtin::PLUGIN, builtin::NEXT_PAGE).unwrap();
+    host.key(1, true);
+    host.key(1, false);
+    assert_eq!(host.layout().unwrap().page, first);
+    assert_eq!(host.key_info(0).unwrap().action, "website");
+
+    // A folder opens its own page with a Back key, and is named by its settings.
+    host.place(5, builtin::PLUGIN, builtin::FOLDER).unwrap();
+    host.set_settings(5, serde_json::json!({ "name": "Games" }));
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 5, face } if face.title == "Games"),
+    );
+    host.key(5, true);
+    host.key(5, false);
+    let view = host.layout().unwrap();
+    assert_eq!(view.top_page, first);
+    assert_eq!(view.path.len(), 1);
+    assert_eq!(view.path[0].name, "Games");
+    assert_eq!(host.key_info(0).unwrap().action, builtin::BACK);
+    host.key(0, true);
+    host.key(0, false);
+    assert_eq!(host.layout().unwrap().page, first);
+
+    // Your own title wins over the action's.
+    host.set_look(
+        5,
+        Look {
+            title: Some("Play".into()),
+            ..Default::default()
+        },
+    );
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 5, face } if face.title == "Play"),
+    );
+
+    // Profiles: a new one starts with one empty page; switching back keeps the old.
+    host.layout_op(LayoutOp::AddProfile("Work".into())).unwrap();
+    let view = host.layout().unwrap();
+    assert_eq!(view.profiles.len(), 2);
+    assert!(host.key_info(0).is_none());
+    let work = view.profile.clone();
+    let home = view
+        .profiles
+        .iter()
+        .find(|p| p.id != work)
+        .unwrap()
+        .id
+        .clone();
+    host.layout_op(LayoutOp::SwitchProfile(home.clone()))
+        .unwrap();
+    assert_eq!(host.key_info(0).unwrap().action, "website");
+    assert!(host.layout_op(LayoutOp::RemoveProfile(work)).is_ok());
+    assert!(
+        host.layout_op(LayoutOp::RemoveProfile(home)).is_err(),
+        "the last profile stays"
+    );
+
+    // Removing the folder key removes its page.
+    host.clear(5);
+    drop(host);
+    std::thread::sleep(Duration::from_millis(200));
+    let saved = std::fs::read_to_string(data.path().join("layout.json")).unwrap();
+    assert!(!saved.contains("Games"), "{saved}");
+    assert_eq!(saved.matches("\"parent\"").count(), 0);
+}
+
+#[test]
+fn plugins_hear_about_page_changes() {
+    if !node_ok() {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .unwrap();
+    wait_for(
+        &rx,
+        10,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello"),
+    );
+    host.key(0, true);
+    host.key(0, false);
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "n=1"),
+    );
+    let first = host.layout().unwrap().page;
+
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title.is_empty() && face.image.is_none()),
+    );
+    // The plugin keeps running for the page that isn't showing.
+    assert_eq!(host.plugins()[0].status, "running");
+    host.layout_op(LayoutOp::GoToPage(first)).unwrap();
+    // willAppear again: the plugin redraws its count.
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "n=1"),
+    );
 }

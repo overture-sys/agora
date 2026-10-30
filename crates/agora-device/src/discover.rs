@@ -57,7 +57,9 @@ pub fn describe_all(api: &HidApi, only_vendor_pages: bool) -> Vec<String> {
 /// Opens a found M18. Fails with a hint if another app (VSD Craft) holds it.
 pub fn open_m18(api: &HidApi, found: &Found) -> Result<M18<HidTransport>> {
     let dev = api.open_path(&found.path).map_err(|e| {
-        Error::Usb(format!("{e}. Is VSD Craft (Stream Dock) still running? Close it and try again."))
+        Error::Usb(format!(
+            "{e}. Is VSD Craft (Stream Dock) still running? Close it and try again."
+        ))
     })?;
     Ok(M18::new(HidTransport::new(dev, m18::OUT_LEN)))
 }

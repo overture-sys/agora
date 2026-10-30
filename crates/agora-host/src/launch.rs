@@ -21,7 +21,9 @@ pub(crate) enum Running {
 
 /// Node.js to use: the configured one, else `node` on PATH.
 fn node_program(configured: Option<&Path>) -> PathBuf {
-    configured.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" }))
+    configured
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -38,7 +40,12 @@ pub(crate) fn spawn(
     let mut cmd = match kind {
         Kind::Node(script) => {
             let mut c = Command::new(node_program(node));
-            if let Some(debug) = plugin.manifest.nodejs.as_ref().and_then(|n| n.debug.clone()) {
+            if let Some(debug) = plugin
+                .manifest
+                .nodejs
+                .as_ref()
+                .and_then(|n| n.debug.clone())
+            {
                 // Only the documented inspector flag, bound to localhost.
                 if debug.starts_with("--inspect=127.0.0.1:") {
                     c.arg(debug);
@@ -50,12 +57,21 @@ pub(crate) fn spawn(
         Kind::Exe(program) => Command::new(program),
         Kind::Html(_) => return Ok(Running::Html),
     };
-    cmd.args(["-port", &port.to_string(), "-pluginUUID", &plugin.uuid, "-registerEvent", "registerPlugin", "-info", info])
-        .current_dir(&plugin.dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    cmd.args([
+        "-port",
+        &port.to_string(),
+        "-pluginUUID",
+        &plugin.uuid,
+        "-registerEvent",
+        "registerPlugin",
+        "-info",
+        info,
+    ])
+    .current_dir(&plugin.dir)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     #[cfg(windows)]
     {
         // No console window per plugin.
@@ -73,8 +89,20 @@ pub(crate) fn spawn(
     let log_path = log_dir.join(format!("{}.log", plugin.uuid));
     let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
     for (stream, label) in [
-        (child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>), "out"),
-        (child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>), "err"),
+        (
+            child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+            "out",
+        ),
+        (
+            child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+            "err",
+        ),
     ] {
         let Some(stream) = stream else { continue };
         let tx = line_tx.clone();
@@ -91,7 +119,12 @@ pub(crate) fn spawn(
     let uuid = plugin.uuid.clone();
     let events2 = events.clone();
     tokio::spawn(async move {
-        let mut file = tokio::fs::OpenOptions::new().create(true).append(true).open(&log_path).await.ok();
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .await
+            .ok();
         // Keep log files from growing without limit.
         if let Ok(meta) = tokio::fs::metadata(&log_path).await {
             if meta.len() > 2_000_000 {
@@ -103,7 +136,10 @@ pub(crate) fn spawn(
             if let Some(f) = file.as_mut() {
                 let _ = f.write_all(format!("{line}\n").as_bytes()).await;
             }
-            let _ = events2.send(HostEvent::Log { plugin: uuid.clone(), message: line });
+            let _ = events2.send(HostEvent::Log {
+                plugin: uuid.clone(),
+                message: line,
+            });
         }
     });
 

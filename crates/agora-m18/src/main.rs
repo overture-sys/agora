@@ -58,7 +58,10 @@ fn flag(args: &[String], name: &str) -> bool {
 }
 
 fn value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 fn list(args: &[String]) -> R<()> {
@@ -82,26 +85,35 @@ fn list(args: &[String]) -> R<()> {
 fn connect() -> R<(DockWorker, Receiver<Event>)> {
     let api = discover::api().map_err(|e| e.to_string())?;
     let found = discover::find(&api);
-    let first = found
-        .first()
-        .ok_or("No M18 found. Is it plugged in? Run `agora-m18 list --all` and send the output back.")?;
+    let first = found.first().ok_or(
+        "No M18 found. Is it plugged in? Run `agora-m18 list --all` and send the output back.",
+    )?;
     println!("Opening {} {:?}", first.model, first.product);
     let dock = discover::open_m18(&api, first).map_err(|e| e.to_string())?;
     DockWorker::start(dock).map_err(|e| e.to_string())
 }
 
-fn show_faces(worker: &DockWorker, orientation: Orientation, face: impl Fn(usize) -> agora_device::keyimage::DynamicImage) -> R<()> {
+fn show_faces(
+    worker: &DockWorker,
+    orientation: Orientation,
+    face: impl Fn(usize) -> agora_device::keyimage::DynamicImage,
+) -> R<()> {
     let size = worker.layout.key_size;
     for key in 0..worker.layout.key_count() {
-        let jpeg = keyimage::to_key_jpeg(&face(key), size, orientation).map_err(|e| e.to_string())?;
+        let jpeg =
+            keyimage::to_key_jpeg(&face(key), size, orientation).map_err(|e| e.to_string())?;
         worker.send(Command::SetKeyJpeg(key, jpeg));
     }
     Ok(())
 }
 
 fn test(args: &[String]) -> R<()> {
-    let seconds: u64 = value(args, "--seconds").and_then(|s| s.parse().ok()).unwrap_or(30);
-    let brightness: u8 = value(args, "--brightness").and_then(|s| s.parse().ok()).unwrap_or(80);
+    let seconds: u64 = value(args, "--seconds")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let brightness: u8 = value(args, "--brightness")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(80);
     let orientation = match value(args, "--orientation") {
         Some(name) => Orientation::parse(name).ok_or(format!("unknown orientation {name}"))?,
         None => Orientation::Upright,
@@ -115,7 +127,12 @@ fn test(args: &[String]) -> R<()> {
     worker.send(Command::Brightness(brightness));
     show_faces(&worker, orientation, |key| match &picture {
         Some(img) => img.clone(),
-        None => keyimage::text_face(64, [20, 30, 60], [255, 255, 255], &["KEY", &(key + 1).to_string()]),
+        None => keyimage::text_face(
+            64,
+            [20, 30, 60],
+            [255, 255, 255],
+            &["KEY", &(key + 1).to_string()],
+        ),
     })?;
     println!("Numbered every key 1-15 (reading order).");
     if flag(args, "--ring") {
@@ -129,7 +146,12 @@ fn test(args: &[String]) -> R<()> {
     while Instant::now() < end {
         match events.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Input(ev)) => {
-                println!("  0x{:02x}  {}  {}", ev.raw_id, if ev.pressed { "DOWN" } else { "up  " }, name(ev.control));
+                println!(
+                    "  0x{:02x}  {}  {}",
+                    ev.raw_id,
+                    if ev.pressed { "DOWN" } else { "up  " },
+                    name(ev.control)
+                );
                 if ev.pressed {
                     presses += 1;
                 }
@@ -148,14 +170,19 @@ fn orient() -> R<()> {
     let (worker, _events) = connect()?;
     println!("Each key will show a white arrow, a yellow block and its number.");
     println!("Correct means: arrow points UP, yellow block in the TOP-LEFT corner,");
-    println!("and the numbers run 1-5 across the top row, 6-10 in the middle, 11-15 at the bottom.\n");
+    println!(
+        "and the numbers run 1-5 across the top row, 6-10 in the middle, 11-15 at the bottom.\n"
+    );
     let stdin = std::io::stdin();
     for o in Orientation::ALL {
         show_faces(&worker, o, |key| keyimage::orientation_face(64, key))?;
         print!("Trying '{}'. Is everything correct? [y/n/q] ", o.name());
         std::io::stdout().flush().ok();
         let mut line = String::new();
-        stdin.lock().read_line(&mut line).map_err(|e| e.to_string())?;
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
         match line.trim().to_lowercase().as_str() {
             "y" | "yes" => {
                 let msg = format!("orient: '{}' is correct", o.name());
@@ -181,7 +208,9 @@ fn orient() -> R<()> {
 fn buttons() -> R<()> {
     let (worker, events) = connect()?;
     worker.send(Command::Brightness(80));
-    show_faces(&worker, Orientation::Upright, |_| keyimage::text_face(64, [20, 30, 60], [255, 255, 255], &["BTN", "TEST"]))?;
+    show_faces(&worker, Orientation::Upright, |_| {
+        keyimage::text_face(64, [20, 30, 60], [255, 255, 255], &["BTN", "TEST"])
+    })?;
     let mut ids = Vec::new();
     for which in ["LEFT", "MIDDLE", "RIGHT"] {
         println!("Press and release the {which} round button (30 s)...");
@@ -189,7 +218,10 @@ fn buttons() -> R<()> {
         println!("  {which} = 0x{id:02x}");
         ids.push(id);
     }
-    let msg = format!("buttons: left=0x{:02x} middle=0x{:02x} right=0x{:02x}", ids[0], ids[1], ids[2]);
+    let msg = format!(
+        "buttons: left=0x{:02x} middle=0x{:02x} right=0x{:02x}",
+        ids[0], ids[1], ids[2]
+    );
     println!("\n{msg}");
     let matches_default = ids == [0x25, 0x30, 0x31];
     println!(
@@ -210,11 +242,19 @@ fn preview(args: &[String]) -> R<()> {
     let faces = [
         ("orient-key1.png", keyimage::orientation_face(64, 0)),
         ("orient-key15.png", keyimage::orientation_face(64, 14)),
-        ("test-key7.png", keyimage::text_face(64, [20, 30, 60], [255, 255, 255], &["KEY", "7"])),
-        ("buttons.png", keyimage::text_face(64, [20, 30, 60], [255, 255, 255], &["BTN", "TEST"])),
+        (
+            "test-key7.png",
+            keyimage::text_face(64, [20, 30, 60], [255, 255, 255], &["KEY", "7"]),
+        ),
+        (
+            "buttons.png",
+            keyimage::text_face(64, [20, 30, 60], [255, 255, 255], &["BTN", "TEST"]),
+        ),
     ];
     for (file, img) in faces {
-        img.resize(256, 256, keyimage::FilterType::Nearest).save(dir.join(file)).map_err(|e| e.to_string())?;
+        img.resize(256, 256, keyimage::FilterType::Nearest)
+            .save(dir.join(file))
+            .map_err(|e| e.to_string())?;
     }
     println!("Saved previews to {}", dir.display());
     Ok(())
@@ -225,7 +265,9 @@ fn wait_for_button(events: &Receiver<Event>, timeout: Duration) -> R<u8> {
     while Instant::now() < end {
         match events.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Input(ev)) if ev.pressed => match ev.control {
-                Control::Key(k) => println!("  (that was screen key {}, press a round button)", k + 1),
+                Control::Key(k) => {
+                    println!("  (that was screen key {}, press a round button)", k + 1)
+                }
                 _ => return Ok(ev.raw_id),
             },
             Ok(Event::Error(e)) => return Err(format!("device error: {e}")),
@@ -254,7 +296,11 @@ fn record(line: &str) {
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("agora-m18-results.txt")))
         .unwrap_or_else(|| "agora-m18-results.txt".into());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }

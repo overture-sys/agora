@@ -40,7 +40,11 @@ fn fontdb() -> Arc<usvg::fontdb::Database> {
     DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
-        db.set_sans_serif_family(if cfg!(windows) { "Segoe UI" } else { "DejaVu Sans" });
+        db.set_sans_serif_family(if cfg!(windows) {
+            "Segoe UI"
+        } else {
+            "DejaVu Sans"
+        });
         Arc::new(db)
     })
     .clone()
@@ -53,7 +57,10 @@ pub fn normalize_data_uri(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("data:")?;
     let (meta, data) = rest.split_once(',')?;
     let mime = meta.split(';').next().unwrap_or("").trim();
-    if meta.split(';').any(|p| p.trim().eq_ignore_ascii_case("base64")) {
+    if meta
+        .split(';')
+        .any(|p| p.trim().eq_ignore_ascii_case("base64"))
+    {
         // Some plugins wrap base64 across lines.
         let clean: String = data.chars().filter(|c| !c.is_whitespace()).collect();
         return Some(format!("data:{mime};base64,{clean}"));
@@ -77,7 +84,12 @@ pub fn file_data_uri(plugin_dir: &Path, rel: &str) -> Option<String> {
     ];
     let path = tries.iter().find(|p| p.is_file())?;
     let bytes = std::fs::read(path).ok()?;
-    let mime = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("svg") => "image/svg+xml",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
@@ -87,12 +99,19 @@ pub fn file_data_uri(plugin_dir: &Path, rel: &str) -> Option<String> {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn safe_color(c: &str) -> String {
     let ok = c.starts_with('#') && c.len() <= 9 && c[1..].chars().all(|ch| ch.is_ascii_hexdigit());
-    if ok { c.to_string() } else { "#ffffff".into() }
+    if ok {
+        c.to_string()
+    } else {
+        "#ffffff".into()
+    }
 }
 
 /// The face as one SVG document on a 72x72 canvas.
@@ -107,7 +126,11 @@ pub fn face_svg(face: &Face) -> String {
         ));
     }
     if face.show_title && !face.title.is_empty() {
-        let size = if face.font_size > 0.0 { face.font_size.min(40.0) } else { 9.0 };
+        let size = if face.font_size > 0.0 {
+            face.font_size.min(40.0)
+        } else {
+            9.0
+        };
         let lines: Vec<&str> = face.title.split('\n').collect();
         let line_h = size * 1.15;
         let block = line_h * (lines.len() as f32 - 1.0);
@@ -143,11 +166,18 @@ pub fn face_svg(face: &Face) -> String {
 /// read leaves the key black rather than failing.
 pub fn render(face: &Face, size: u32) -> DynamicImage {
     let svg = face_svg(face);
-    let opts = usvg::Options { fontdb: fontdb(), ..Default::default() };
+    let opts = usvg::Options {
+        fontdb: fontdb(),
+        ..Default::default()
+    };
     let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("non-zero key size");
     if let Ok(tree) = usvg::Tree::from_str(&svg, &opts) {
         let scale = size as f32 / 72.0;
-        resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
     }
     let img = RgbaImage::from_raw(size, size, pixmap.take()).expect("pixmap size");
     DynamicImage::ImageRgba8(img)
@@ -166,7 +196,10 @@ mod tests {
 
     #[test]
     fn percent_encoded_svg_renders() {
-        let face = Face { image: Some(utf8_uri(RED_SVG)), ..Default::default() };
+        let face = Face {
+            image: Some(utf8_uri(RED_SVG)),
+            ..Default::default()
+        };
         let img = render(&face, 64).to_rgba8();
         let p = img.get_pixel(32, 32);
         assert!(p[0] > 200 && p[1] < 40, "centre pixel {p:?}");
@@ -176,8 +209,13 @@ mod tests {
     fn base64_png_renders() {
         let mut png = Vec::new();
         let src = RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255]));
-        DynamicImage::ImageRgba8(src).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-        let face = Face { image: Some(format!("data:image/png;base64,{}", B64.encode(&png))), ..Default::default() };
+        DynamicImage::ImageRgba8(src)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let face = Face {
+            image: Some(format!("data:image/png;base64,{}", B64.encode(&png))),
+            ..Default::default()
+        };
         let p = *render(&face, 64).to_rgba8().get_pixel(32, 32);
         assert!(p[2] > 200 && p[0] < 40, "centre pixel {p:?}");
     }
@@ -199,7 +237,14 @@ mod tests {
 
     #[test]
     fn overlays_draw() {
-        let ok = render(&Face { overlay: Overlay::Ok, ..Default::default() }, 64).to_rgba8();
+        let ok = render(
+            &Face {
+                overlay: Overlay::Ok,
+                ..Default::default()
+            },
+            64,
+        )
+        .to_rgba8();
         let p = ok.get_pixel(20, 32);
         assert!(p[1] > p[0], "expected green, got {p:?}");
     }

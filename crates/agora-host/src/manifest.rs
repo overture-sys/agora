@@ -136,13 +136,25 @@ pub struct Plugin {
 impl Plugin {
     /// Reads `dir/manifest.json`. The plugin id is the folder name without `.sdPlugin`.
     pub fn load(dir: &Path, source: Source) -> Result<Self, String> {
-        let name = dir.file_name().and_then(|n| n.to_str()).ok_or("bad folder name")?;
-        let uuid = name.strip_suffix(".sdPlugin").ok_or("not a .sdPlugin folder")?.to_string();
-        let text = std::fs::read_to_string(dir.join("manifest.json")).map_err(|e| format!("{name}: {e}"))?;
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("bad folder name")?;
+        let uuid = name
+            .strip_suffix(".sdPlugin")
+            .ok_or("not a .sdPlugin folder")?
+            .to_string();
+        let text = std::fs::read_to_string(dir.join("manifest.json"))
+            .map_err(|e| format!("{name}: {e}"))?;
         // Some manifests start with a UTF-8 byte order mark.
         let text = text.trim_start_matches('\u{feff}');
         let manifest: Manifest = serde_json::from_str(text).map_err(|e| format!("{name}: {e}"))?;
-        Ok(Self { uuid, dir: dir.to_path_buf(), manifest, source })
+        Ok(Self {
+            uuid,
+            dir: dir.to_path_buf(),
+            manifest,
+            source,
+        })
     }
 
     pub fn action(&self, uuid: &str) -> Option<&ActionDef> {
@@ -157,10 +169,17 @@ impl Plugin {
         } else if cfg!(target_os = "macos") {
             m.code_path_mac.as_ref().or(m.code_path.as_ref())
         } else {
-            m.code_path.as_ref().or(m.code_path_win.as_ref()).or(m.code_path_mac.as_ref())
+            m.code_path
+                .as_ref()
+                .or(m.code_path_win.as_ref())
+                .or(m.code_path_mac.as_ref())
         }?;
         let path = self.dir.join(rel);
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         Some(match ext.as_str() {
             "html" | "htm" => Kind::Html(path),
             "js" | "cjs" | "mjs" => Kind::Node(path),
@@ -183,12 +202,17 @@ pub fn discover(dirs: &[(PathBuf, Source)]) -> (Vec<Plugin>, Vec<String>) {
     let mut plugins: Vec<Plugin> = Vec::new();
     let mut problems = Vec::new();
     for (dir, source) in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         paths.sort();
         for path in paths {
             let is_plugin = path.is_dir()
-                && path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("sdPlugin"));
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("sdPlugin"));
             if !is_plugin {
                 continue;
             }
@@ -204,7 +228,12 @@ pub fn discover(dirs: &[(PathBuf, Source)]) -> (Vec<Plugin>, Vec<String>) {
 
 /// VSD Craft's plugin folder on Windows: `%APPDATA%\HotSpot\StreamDock\plugins`.
 pub fn vsd_craft_plugin_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("HotSpot").join("StreamDock").join("plugins"))
+    std::env::var_os("APPDATA").map(|a| {
+        PathBuf::from(a)
+            .join("HotSpot")
+            .join("StreamDock")
+            .join("plugins")
+    })
 }
 
 #[cfg(test)]
@@ -232,19 +261,39 @@ mod tests {
         let dir = write_plugin(tmp.path(), "com.demo", &format!("\u{feff}{NODE_MANIFEST}"));
         let p = Plugin::load(&dir, Source::Agora).unwrap();
         assert_eq!(p.uuid, "com.demo");
-        assert_eq!(p.manifest.actions[0].states[0].title_alignment.as_deref(), Some("bottom"));
+        assert_eq!(
+            p.manifest.actions[0].states[0].title_alignment.as_deref(),
+            Some("bottom")
+        );
         assert!(matches!(p.kind(), Some(Kind::Node(_))));
-        assert_eq!(p.property_inspector("com.demo.a").as_deref(), Some("pi/index.html"));
+        assert_eq!(
+            p.property_inspector("com.demo.a").as_deref(),
+            Some("pi/index.html")
+        );
         assert!(p.manifest.actions[0].visible_in_actions_list);
     }
 
     #[test]
     fn html_and_exe_kinds() {
         let tmp = tempfile::tempdir().unwrap();
-        let html = write_plugin(tmp.path(), "com.h", r#"{"Name":"H","CodePath":"index.html","Actions":[]}"#);
-        let exe = write_plugin(tmp.path(), "com.e", r#"{"Name":"E","CodePath":"bin/plugin.exe","Actions":[]}"#);
-        assert!(matches!(Plugin::load(&html, Source::Agora).unwrap().kind(), Some(Kind::Html(_))));
-        assert!(matches!(Plugin::load(&exe, Source::Agora).unwrap().kind(), Some(Kind::Exe(_))));
+        let html = write_plugin(
+            tmp.path(),
+            "com.h",
+            r#"{"Name":"H","CodePath":"index.html","Actions":[]}"#,
+        );
+        let exe = write_plugin(
+            tmp.path(),
+            "com.e",
+            r#"{"Name":"E","CodePath":"bin/plugin.exe","Actions":[]}"#,
+        );
+        assert!(matches!(
+            Plugin::load(&html, Source::Agora).unwrap().kind(),
+            Some(Kind::Html(_))
+        ));
+        assert!(matches!(
+            Plugin::load(&exe, Source::Agora).unwrap().kind(),
+            Some(Kind::Exe(_))
+        ));
     }
 
     #[test]
@@ -254,8 +303,10 @@ mod tests {
         write_plugin(own.path(), "com.demo", NODE_MANIFEST);
         write_plugin(vsd.path(), "com.demo", NODE_MANIFEST);
         write_plugin(vsd.path(), "com.broken", "{ not json");
-        let (plugins, problems) =
-            discover(&[(own.path().into(), Source::Agora), (vsd.path().into(), Source::VsdCraft)]);
+        let (plugins, problems) = discover(&[
+            (own.path().into(), Source::Agora),
+            (vsd.path().into(), Source::VsdCraft),
+        ]);
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].source, Source::Agora);
         assert_eq!(problems.len(), 1);

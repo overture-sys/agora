@@ -23,7 +23,11 @@ pub struct HidTransport {
 impl HidTransport {
     /// Wraps an open HID device whose output reports are `out_len` bytes.
     pub fn new(dev: hidapi::HidDevice, out_len: usize) -> Self {
-        Self { dev, out_len, buf: Vec::with_capacity(out_len + 1) }
+        Self {
+            dev,
+            out_len,
+            buf: Vec::with_capacity(out_len + 1),
+        }
     }
 }
 
@@ -31,7 +35,10 @@ impl HidTransport {
 impl Transport for HidTransport {
     fn write(&mut self, data: &[u8]) -> Result<()> {
         if data.len() > self.out_len {
-            return Err(crate::Error::TooLong { len: data.len(), max: self.out_len });
+            return Err(crate::Error::TooLong {
+                len: data.len(),
+                max: self.out_len,
+            });
         }
         // Report id 0, then the payload padded to the full report length.
         // The M18 drops anything shorter.

@@ -78,7 +78,11 @@ pub fn open_image(path: &std::path::Path) -> Result<DynamicImage> {
 /// A plain face: background colour with centred text (one or two lines).
 pub fn text_face(size: u32, bg: [u8; 3], fg: [u8; 3], lines: &[&str]) -> DynamicImage {
     let mut img = RgbImage::from_pixel(size, size, Rgb(bg));
-    let scale = if lines.iter().all(|l| glyphs::text_width(l, 2) <= size - 4) { 2 } else { 1 };
+    let scale = if lines.iter().all(|l| glyphs::text_width(l, 2) <= size - 4) {
+        2
+    } else {
+        1
+    };
     let line_h = 7 * scale as i32 + 3 * scale as i32;
     let total_h = line_h * lines.len() as i32 - 3 * scale as i32;
     let mut y = (size as i32 - total_h) / 2;
@@ -101,10 +105,14 @@ pub fn orientation_face(size: u32, key: usize) -> DynamicImage {
             put(&mut img, x, y, [255, 200, 0]);
         }
     }
-    glyphs::draw("^", s / 2 - 7, 4, 3, |x, y| put(&mut img, x, y, [255, 255, 255]));
+    glyphs::draw("^", s / 2 - 7, 4, 3, |x, y| {
+        put(&mut img, x, y, [255, 255, 255])
+    });
     let label = (key + 1).to_string();
     let w = glyphs::text_width(&label, 3) as i32;
-    glyphs::draw(&label, (s - w) / 2, s - 7 * 3 - 6, 3, |x, y| put(&mut img, x, y, [120, 220, 255]));
+    glyphs::draw(&label, (s - w) / 2, s - 7 * 3 - 6, 3, |x, y| {
+        put(&mut img, x, y, [120, 220, 255])
+    });
     DynamicImage::ImageRgb8(img)
 }
 

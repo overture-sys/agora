@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import "@fontsource/marcellus-sc/400.css";
 
@@ -8,7 +9,10 @@
   type Input = { kind: "key" | "button" | "unknown"; index: number; pressed: boolean; raw_id: number };
   type Action = { plugin: string; plugin_name: string; category: string; action: string; name: string; tooltip: string; icon: string | null; group_icon: string | null };
   type Plugin = { uuid: string; name: string; version: string; source: string; kind: string; status: string; dir: string; hidden: boolean };
-  type KeyInfo = { key: number; plugin: string; plugin_name: string; action: string; name: string; settings_url: string | null };
+  type Look = { title?: string | null; show_title?: boolean | null; align?: string | null; color?: string | null; font_size?: number | null; icon?: string | null };
+  type KeyInfo = { key: number; plugin: string; plugin_name: string; action: string; name: string; settings_url: string | null; builtin: boolean; settings: Record<string, any>; look: Look };
+  type NameId = { id: string; name: string };
+  type LayoutView = { profiles: NameId[]; profile: string; pages: NameId[]; page: string; top_page: string; path: NameId[] };
   type Preview = { key: number; image: string | null };
   type Line = { plugin: string; message: string };
   type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean };
@@ -31,6 +35,14 @@
     { name: "Marble", color: "#f3ecdf" },
   ];
   const buttonNames = ["Left", "Middle", "Right"];
+  const mediaKeys = [
+    { id: "play-pause", name: "Play / pause" },
+    { id: "next", name: "Next track" },
+    { id: "previous", name: "Previous track" },
+    { id: "volume-up", name: "Volume up" },
+    { id: "volume-down", name: "Volume down" },
+    { id: "mute", name: "Mute" },
+  ];
 
   let page = $state<Page>("home");
   let status = $state<Status>({ connected: false, model: null, rows: 3, columns: 5, message: "Looking for your dock..." });
@@ -49,8 +61,11 @@
   let settings = $state<Settings>({ brightness: 80, ring_color: "#d9794a", ring_on: false, ring_brightness: 100, use_vsd_craft_plugins: false });
   let error = $state("");
   let notice = $state("");
-  // The plugin whose Delete was clicked once and now asks to be sure.
+  // The plugin (or "page:id", "profile:id") whose Delete was clicked once and now asks to be sure.
   let confirming = $state<string | null>(null);
+  let layout = $state<LayoutView | null>(null);
+  // A page or profile name being edited in place.
+  let renaming = $state<{ kind: "page" | "profile"; id: string; name: string } | null>(null);
 
   // Plugin groups the person has opened in the action list.
   let openGroups = $state(new Set<string>());
@@ -109,6 +124,129 @@
   function clickKey(k: number) {
     // Clicking the open key again goes back to the overview.
     loadKey(selected === k ? null : k);
+  }
+
+  // ---- profiles and pages ----
+
+  async function loadLayout() {
+    const before = layout?.page;
+    layout = (await invoke<LayoutView | null>("get_layout").catch(() => null)) ?? null;
+    // Another page: the open key was on the old one.
+    if (before !== undefined && layout && layout.page !== before) loadKey(null);
+  }
+
+  async function layoutOp(op: string, id?: string, name?: string) {
+    renaming = null;
+    confirming = null;
+    await call("layout_op", { op, id, name });
+    await loadLayout();
+    loadOverview();
+  }
+
+  function startRename(kind: "page" | "profile", item: NameId) {
+    renaming = { kind, id: item.id, name: item.name };
+  }
+
+  function finishRename() {
+    if (!renaming) return;
+    const r = renaming;
+    layoutOp(r.kind === "page" ? "rename-page" : "rename-profile", r.id, r.name);
+  }
+
+  function removeWithConfirm(kind: "page" | "profile", id: string) {
+    const tag = `${kind}:${id}`;
+    if (confirming !== tag) {
+      confirming = tag;
+      return;
+    }
+    layoutOp(kind === "page" ? "remove-page" : "remove-profile", id);
+  }
+
+  function openFolder(k: number) {
+    const ki = keyInfos[k];
+    if (ki?.builtin && ki.action === "folder" && ki.settings.page) layoutOp("go-to-page", ki.settings.page);
+  }
+
+  const pageName = $derived.by(() => {
+    if (!layout) return "";
+    const top = layout.pages.find((p) => p.id === layout!.top_page)?.name ?? "";
+    return layout.path.length ? layout.path[layout.path.length - 1].name : top;
+  });
+
+  // ---- a key's own settings and look ----
+
+  async function saveSettings(patch: Record<string, unknown>) {
+    if (!info || selected === null) return;
+    info.settings = { ...info.settings, ...patch };
+    await call("set_key_settings", { key: selected, settings: info.settings });
+    if (info.action === "folder") loadLayout();
+    loadOverview();
+  }
+
+  async function saveLook(patch: Look) {
+    if (!info || selected === null) return;
+    const look = { ...info.look, ...patch };
+    // Empty means "the action's own".
+    for (const k of Object.keys(look) as (keyof Look)[]) if (look[k] === null || look[k] === undefined) delete look[k];
+    info.look = look;
+    await call("set_key_look", { key: selected, look });
+  }
+
+  async function pickProgram() {
+    const path = await openDialog({ multiple: false, directory: false, title: "Choose an app or file" }).catch(() => null);
+    if (typeof path === "string") saveSettings({ path });
+  }
+
+  async function pickFolderPath() {
+    const path = await openDialog({ multiple: false, directory: true, title: "Choose a folder" }).catch(() => null);
+    if (typeof path === "string") saveSettings({ path });
+  }
+
+  /// Reads an image file, shrinks it to the key's size and saves it as the key's icon.
+  function pickIcon(e: Event & { currentTarget: HTMLInputElement }) {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const size = 144;
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d")!;
+        const scale = Math.min(size / img.width, size / img.height);
+        const w = img.width * scale, h = img.height * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+        saveLook({ icon: c.toDataURL("image/png") });
+      };
+      img.onerror = () => (error = "That file isn't an image Agora can read.");
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  /// Turns a key press in the hotkey box into "Ctrl+Shift+M".
+  function recordHotkey(e: KeyboardEvent) {
+    if (e.key === "Tab") return;
+    e.preventDefault();
+    const named: Record<string, string> = { " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right", Escape: "Esc", Delete: "Del", PageUp: "PgUp", PageDown: "PgDn", PrintScreen: "PrtSc" };
+    if (["Control", "Shift", "Alt", "Meta", "OS"].includes(e.key)) return;
+    if (e.key === "Backspace" && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+      saveSettings({ keys: "" });
+      return;
+    }
+    const parts = [];
+    if (e.ctrlKey) parts.push("Ctrl");
+    if (e.shiftKey) parts.push("Shift");
+    if (e.altKey) parts.push("Alt");
+    if (e.metaKey) parts.push("Win");
+    let k = named[e.key] ?? e.key;
+    if (/^Key[A-Z]$/.test(e.code)) k = e.code.slice(3);
+    else if (/^Digit\d$/.test(e.code)) k = e.code.slice(5);
+    else if (k.length === 1) k = k.toUpperCase();
+    parts.push(k);
+    saveSettings({ keys: parts.join("+") });
   }
 
   async function loadOverview() {
@@ -185,6 +323,7 @@
   async function refreshAll() {
     actions = (await call<Action[]>("list_actions")) ?? [];
     await refreshPlugins();
+    await loadLayout();
     await loadKey(selected);
     await loadOverview();
   }
@@ -267,8 +406,12 @@
     call<Action[]>("list_actions").then((a) => (actions = a ?? []));
     refreshPlugins();
     loadOverview();
+    loadLayout();
     const onKeydown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && page === "keys") loadKey(null);
+      if (e.key === "Escape" && page === "keys") {
+        if (renaming) renaming = null;
+        else loadKey(null);
+      }
     };
     window.addEventListener("keydown", onKeydown);
     // The status also comes as events; this catches any the window missed
@@ -297,7 +440,12 @@
         addLog(`${e.payload.plugin}: ${e.payload.message}`);
         refreshPlugins();
       }),
-      listen<Line>("plugin-log", (e) => addLog(`${e.payload.plugin}: ${e.payload.message}`)),
+        listen<Line>("plugin-log", (e) => addLog(`${e.payload.plugin}: ${e.payload.message}`)),
+      listen("page-changed", () => {
+        loadLayout();
+        loadOverview();
+      }),
+      listen("settings-changed", () => call<Settings>("get_settings").then((s) => s && (settings = s))),
       listen("host-restarted", () => {
         loadPreviews();
         refreshAll();
@@ -322,6 +470,7 @@
         class:selected={editable && selected === k}
         class:drop={dropTarget === k}
         onclick={() => (editable ? clickKey(k) : openKey(k))}
+        ondblclick={() => editable && openFolder(k)}
         draggable={editable && previews[k] ? "true" : "false"}
         ondragstart={(e) => {
           draggedKey = k;
@@ -344,7 +493,11 @@
           e.preventDefault();
           dropOn(k);
         }}
-        title={editable ? (previews[k] ? `Key ${k + 1}: drag to move it` : `Key ${k + 1}`) : `Edit key ${k + 1}`}
+        title={editable
+          ? keyInfos[k]?.action === "folder" && keyInfos[k]?.builtin
+            ? `Key ${k + 1}: double-click to open the folder`
+            : previews[k] ? `Key ${k + 1}: drag to move it` : `Key ${k + 1}`
+          : `Edit key ${k + 1}`}
       >
         {#if previews[k]}<img src={previews[k]} alt="" draggable="false" />{:else}<span class="num">{k + 1}</span>
           <svg class="palm" viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"
@@ -401,6 +554,157 @@
         {/if}
       {/each}
     </div>
+{/snippet}
+
+{#snippet pageBar()}
+  {#if layout}
+    <div class="pagebar">
+      <div class="profile-row">
+        <span class="label">Profile</span>
+        {#if renaming?.kind === "profile"}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input class="rename" bind:value={renaming.name} autofocus onkeydown={(e) => e.key === "Enter" && finishRename()} onblur={finishRename} />
+        {:else}
+          <select value={layout.profile} onchange={(e) => layoutOp("switch-profile", e.currentTarget.value)} aria-label="Profile">
+            {#each layout.profiles as p}<option value={p.id}>{p.name}</option>{/each}
+          </select>
+          <button class="small" onclick={() => startRename("profile", layout!.profiles.find((p) => p.id === layout!.profile)!)} title="Rename this profile">Rename</button>
+          <button class="small" onclick={() => layoutOp("add-profile", undefined, `Profile ${layout!.profiles.length + 1}`)}>New</button>
+          {#if layout.profiles.length > 1}
+            <button class="small danger" class:sure={confirming === `profile:${layout.profile}`} onclick={() => removeWithConfirm("profile", layout!.profile)}
+              >{confirming === `profile:${layout.profile}` ? "Sure? Delete" : "Delete"}</button
+            >
+          {/if}
+        {/if}
+      </div>
+      <div class="tabs" role="tablist" aria-label="Pages">
+        {#each layout.pages as p}
+          {@const active = p.id === layout.top_page}
+          {#if renaming?.kind === "page" && renaming.id === p.id}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input class="rename tab-input" bind:value={renaming.name} autofocus onkeydown={(e) => e.key === "Enter" && finishRename()} onblur={finishRename} />
+          {:else}
+            <button
+              class="tab"
+              class:active
+              role="tab"
+              aria-selected={active}
+              onclick={() => (active && layout!.path.length === 0 ? startRename("page", p) : layoutOp("go-to-page", p.id))}
+              title={active ? "Click to rename" : `Show ${p.name}`}>{p.name}</button
+            >
+          {/if}
+        {/each}
+        <button class="tab add" onclick={() => layoutOp("add-page")} title="Add a page">+ Page</button>
+        {#if layout.pages.length > 1 && layout.path.length === 0}
+          <button class="tab remove" class:sure={confirming === `page:${layout.top_page}`} onclick={() => removeWithConfirm("page", layout!.top_page)}
+            title="Delete this page and the folders on it">{confirming === `page:${layout.top_page}` ? "Sure? Delete page" : "Delete page"}</button
+          >
+        {/if}
+      </div>
+      {#if layout.path.length}
+        <nav class="crumbs" aria-label="Folder">
+          <button class="small" onclick={() => layoutOp("go-to-page", layout!.path.length > 1 ? layout!.path[layout!.path.length - 2].id : layout!.top_page)}>← Back</button>
+          <button class="crumb" onclick={() => layoutOp("go-to-page", layout!.top_page)}>{layout.pages.find((p) => p.id === layout!.top_page)?.name}</button>
+          {#each layout.path as f, i}
+            <span class="sep">›</span>
+            {#if i === layout.path.length - 1}<b>{f.name}</b>{:else}<button class="crumb" onclick={() => layoutOp("go-to-page", f.id)}>{f.name}</button>{/if}
+          {/each}
+        </nav>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet builtinSettings(ki: KeyInfo)}
+  {@const st = ki.settings}
+  <div class="form">
+    {#if ki.action === "folder"}
+      <label>Folder name <input value={st.name ?? ""} onchange={(e) => saveSettings({ name: e.currentTarget.value })} /></label>
+      <button class="primary" onclick={() => layoutOp("go-to-page", st.page)}>Open folder</button>
+      <p class="muted small">Its keys get their own page, with a Back key on key 1. Double-click the folder key to open it too.</p>
+    {:else if ki.action === "go-to-page"}
+      <label>Page
+        <select value={st.page ?? 1} onchange={(e) => saveSettings({ page: Number(e.currentTarget.value) })}>
+          {#each layout?.pages ?? [] as p, i}<option value={i + 1}>{i + 1}. {p.name}</option>{/each}
+        </select>
+      </label>
+    {:else if ki.action === "switch-profile"}
+      <label>Profile
+        <select value={st.profile ?? ""} onchange={(e) => saveSettings({ profile: e.currentTarget.value })}>
+          <option value="" disabled>Choose a profile</option>
+          {#each layout?.profiles ?? [] as p}<option value={p.id}>{p.name}</option>{/each}
+        </select>
+      </label>
+    {:else if ki.action === "open"}
+      <label>App, file or folder
+        <span class="row grow"><input value={st.path ?? ""} placeholder="C:\Program Files\..." onchange={(e) => saveSettings({ path: e.currentTarget.value })} />
+          <button onclick={pickProgram}>File…</button><button onclick={pickFolderPath}>Folder…</button></span>
+      </label>
+      <label>Arguments <span class="muted small">(programs only)</span><input value={st.args ?? ""} onchange={(e) => saveSettings({ args: e.currentTarget.value })} /></label>
+    {:else if ki.action === "website"}
+      <label>Web address <input value={st.url ?? ""} placeholder="https://" onchange={(e) => saveSettings({ url: e.currentTarget.value })} /></label>
+    {:else if ki.action === "hotkey"}
+      <label>Keys
+        <input class="hotkey" value={st.keys ?? ""} placeholder="Click here, then press the keys" readonly onkeydown={recordHotkey} />
+      </label>
+      <p class="muted small">Press the combination, such as Ctrl+Shift+M. Backspace clears it.</p>
+    {:else if ki.action === "text"}
+      <label>Text <textarea rows="4" value={st.text ?? ""} onchange={(e) => saveSettings({ text: e.currentTarget.value })}></textarea></label>
+      <label class="check"><input type="checkbox" checked={!!st.enter} onchange={(e) => saveSettings({ enter: e.currentTarget.checked })} /> Press Enter afterwards</label>
+    {:else if ki.action === "media"}
+      <label>Key
+        <select value={st.key ?? "play-pause"} onchange={(e) => saveSettings({ key: e.currentTarget.value })}>
+          {#each mediaKeys as m}<option value={m.id}>{m.name}</option>{/each}
+        </select>
+      </label>
+    {:else if ki.action === "brightness"}
+      <label>Each press
+        <select value={st.mode ?? "up"} onchange={(e) => saveSettings({ mode: e.currentTarget.value })}>
+          <option value="up">Brighter (+10%)</option><option value="down">Dimmer (-10%)</option><option value="set">Set to a level</option>
+        </select>
+      </label>
+      {#if st.mode === "set"}
+        <label class="slider"><span>Level <b>{st.value ?? 50}%</b></span>
+          <input type="range" min="0" max="100" value={st.value ?? 50} style="--fill: {st.value ?? 50}%" onchange={(e) => saveSettings({ value: Number(e.currentTarget.value) })} />
+        </label>
+      {/if}
+    {:else if ki.action === "ring"}
+      <label>Each press
+        <select value={st.mode ?? "toggle"} onchange={(e) => saveSettings({ mode: e.currentTarget.value })}>
+          <option value="toggle">Turn on or off</option><option value="on">Turn on</option><option value="off">Turn off</option><option value="color">Set a colour</option>
+        </select>
+      </label>
+      {#if st.mode === "color"}
+        <label class="check">Colour <input type="color" value={st.color ?? "#d9794a"} onchange={(e) => saveSettings({ color: e.currentTarget.value })} /></label>
+      {/if}
+    {:else}
+      <p class="muted">This action has no settings.</p>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet lookEditor(ki: KeyInfo)}
+  {@const lk = ki.look}
+  <details class="look" open={ki.builtin || !ki.settings_url}>
+    <summary>Title and icon</summary>
+    <div class="form">
+      <label>Title
+        <input value={lk.title ?? ""} placeholder="The action's own title" onchange={(e) => saveLook({ title: e.currentTarget.value === "" ? null : e.currentTarget.value })} />
+      </label>
+      <div class="row wrap">
+        <label class="check"><input type="checkbox" checked={lk.show_title ?? true} onchange={(e) => saveLook({ show_title: e.currentTarget.checked })} /> Show title</label>
+        <select value={lk.align ?? ""} onchange={(e) => saveLook({ align: e.currentTarget.value || null })} aria-label="Title position">
+          <option value="">Position: the action's</option><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option>
+        </select>
+        <label class="check">Colour <input type="color" value={lk.color ?? "#ffffff"} onchange={(e) => saveLook({ color: e.currentTarget.value })} /></label>
+      </div>
+      <div class="row wrap">
+        <label class="button-like">Choose icon…<input type="file" accept="image/*" onchange={pickIcon} hidden /></label>
+        {#if lk.icon}<button onclick={() => saveLook({ icon: null })}>Use the action's icon</button>{/if}
+        {#if Object.keys(lk).length}<button onclick={() => { info && (info.look = {}); call("set_key_look", { key: selected, look: {} }); }}>Reset all</button>{/if}
+      </div>
+    </div>
+  </details>
 {/snippet}
 
 {#snippet activity(limit: number)}
@@ -477,6 +781,7 @@
       <div class="keys-page">
         <section class="device">
           <div class="meander"></div>
+          {@render pageBar()}
           {@render keyGrid(true)}
           {#if error}<p class="error">{error}</p>{/if}
         </section>
@@ -486,8 +791,8 @@
           {#if selected === null}
             <div class="side-head">
               <div>
-                <h2>Your keys</h2>
-                <div class="muted">{Object.keys(keyInfos).length} of {keyCount} set up. Click a key to edit it.</div>
+                <h2>{pageName || "Your keys"}</h2>
+                <div class="muted">{Object.keys(keyInfos).length} of {keyCount} keys set up. Click a key to edit it.</div>
               </div>
             </div>
             {#if Object.keys(keyInfos).length > 0}
@@ -525,11 +830,15 @@
                 <button onclick={() => loadKey(null)} title="Back to the overview (Esc)">All keys</button>
               </div>
             </div>
+            {#if info.builtin}
+              {@render builtinSettings(info)}
+            {/if}
+            {@render lookEditor(info)}
             {#if info.settings_url}
               {#key info.settings_url}
                 <iframe class="pi" src={info.settings_url} title="Settings for {info.name}"></iframe>
               {/key}
-            {:else}
+            {:else if !info.builtin}
               <p class="muted">This action has no settings.</p>
             {/if}
           {/if}

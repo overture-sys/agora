@@ -30,7 +30,9 @@ pub(crate) async fn bind(
     plugin_dirs: Arc<HashMap<String, PathBuf>>,
     host: mpsc::UnboundedSender<Msg>,
 ) -> Result<u16, String> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| e.to_string())?;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let app = Router::new()
         .route("/", get(ws))
@@ -44,7 +46,9 @@ pub(crate) async fn bind(
 
 async fn ws(upgrade: WebSocketUpgrade, State(s): State<Shared>) -> Response {
     // Plugin images can be large data URIs.
-    upgrade.max_message_size(16 << 20).on_upgrade(move |socket| run_socket(socket, s.host))
+    upgrade
+        .max_message_size(16 << 20)
+        .on_upgrade(move |socket| run_socket(socket, s.host))
 }
 
 async fn run_socket(mut socket: WebSocket, host: mpsc::UnboundedSender<Msg>) {
@@ -113,7 +117,12 @@ pub(crate) fn connect_url(
 }
 
 fn content_type(path: &std::path::Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("html") | Some("htm") => "text/html; charset=utf-8",
         Some("js") | Some("mjs") | Some("cjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
@@ -150,7 +159,9 @@ async fn file(
         return StatusCode::NOT_FOUND.into_response();
     };
     let ctype = content_type(&path);
-    let wants_connect = query.as_deref().is_some_and(|q| q.split('&').any(|p| p == "agora=1"));
+    let wants_connect = query
+        .as_deref()
+        .is_some_and(|q| q.split('&').any(|p| p == "agora=1"));
     if ctype.starts_with("text/html") && wants_connect {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let lower = text.to_ascii_lowercase();
@@ -160,7 +171,14 @@ async fn file(
         };
         bytes = html.into_bytes();
     }
-    ([(header::CONTENT_TYPE, ctype), (header::CACHE_CONTROL, "no-store")], bytes).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, ctype),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -169,8 +187,18 @@ mod tests {
 
     #[test]
     fn connect_url_encodes_everything() {
-        let u = connect_url(5000, "com.a", "pi/index.html", "CTX", "registerPropertyInspector", "{\"a\":1}", Some("{}"));
-        assert!(u.starts_with("http://127.0.0.1:5000/plugin/com%2Ea/pi/index%2Ehtml?agora=1&port=5000&uuid=CTX"));
+        let u = connect_url(
+            5000,
+            "com.a",
+            "pi/index.html",
+            "CTX",
+            "registerPropertyInspector",
+            "{\"a\":1}",
+            Some("{}"),
+        );
+        assert!(u.starts_with(
+            "http://127.0.0.1:5000/plugin/com%2Ea/pi/index%2Ehtml?agora=1&port=5000&uuid=CTX"
+        ));
         assert!(u.contains("info=%7B%22a%22%3A1%7D"));
         assert!(u.ends_with("&actionInfo=%7B%7D"));
     }

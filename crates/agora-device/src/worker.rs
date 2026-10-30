@@ -26,19 +26,45 @@ pub trait Dock: Send {
 }
 
 impl<T: Transport> Dock for M18<T> {
-    fn layout(&self) -> Layout { M18::layout(self) }
-    fn open(&mut self) -> Result<()> { M18::open(self) }
-    fn set_brightness(&mut self, pct: u8) -> Result<()> { M18::set_brightness(self, pct) }
-    fn keepalive(&mut self) -> Result<()> { M18::keepalive(self) }
-    fn keepalive_interval(&self) -> Duration { Duration::from_millis(crate::m18::KEEPALIVE_MS) }
-    fn clear_all(&mut self) -> Result<()> { M18::clear_all(self) }
-    fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()> { M18::set_key_jpeg(self, key, jpeg) }
-    fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> { M18::set_ring(self, colors) }
-    fn set_ring_brightness(&mut self, pct: u8) -> Result<()> { M18::set_ring_brightness(self, pct) }
-    fn ring_off(&mut self) -> Result<()> { M18::ring_off(self) }
-    fn ring_reset(&mut self) -> Result<()> { M18::ring_reset(self) }
-    fn close(&mut self) -> Result<()> { M18::close(self) }
-    fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>> { M18::read_event(self, timeout_ms) }
+    fn layout(&self) -> Layout {
+        M18::layout(self)
+    }
+    fn open(&mut self) -> Result<()> {
+        M18::open(self)
+    }
+    fn set_brightness(&mut self, pct: u8) -> Result<()> {
+        M18::set_brightness(self, pct)
+    }
+    fn keepalive(&mut self) -> Result<()> {
+        M18::keepalive(self)
+    }
+    fn keepalive_interval(&self) -> Duration {
+        Duration::from_millis(crate::m18::KEEPALIVE_MS)
+    }
+    fn clear_all(&mut self) -> Result<()> {
+        M18::clear_all(self)
+    }
+    fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()> {
+        M18::set_key_jpeg(self, key, jpeg)
+    }
+    fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> {
+        M18::set_ring(self, colors)
+    }
+    fn set_ring_brightness(&mut self, pct: u8) -> Result<()> {
+        M18::set_ring_brightness(self, pct)
+    }
+    fn ring_off(&mut self) -> Result<()> {
+        M18::ring_off(self)
+    }
+    fn ring_reset(&mut self) -> Result<()> {
+        M18::ring_reset(self)
+    }
+    fn close(&mut self) -> Result<()> {
+        M18::close(self)
+    }
+    fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>> {
+        M18::read_event(self, timeout_ms)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +109,14 @@ impl DockWorker {
             .name("agora-dock".into())
             .spawn(move || run(dock, rx, etx))
             .expect("spawn dock thread");
-        Ok((Self { tx, handle: Some(handle), layout }, erx))
+        Ok((
+            Self {
+                tx,
+                handle: Some(handle),
+                layout,
+            },
+            erx,
+        ))
     }
 
     /// Queues a command. Returns false if the worker has stopped.

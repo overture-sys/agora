@@ -27,7 +27,13 @@ pub const KEEPALIVE_MS: u64 = 8000;
 
 const PREFIX: &[u8] = b"CRT\0\0";
 
-pub const LAYOUT: Layout = Layout { rows: 3, columns: 5, key_size: 64, buttons: 3, ring_leds: 24 };
+pub const LAYOUT: Layout = Layout {
+    rows: 3,
+    columns: 5,
+    key_size: 64,
+    buttons: 3,
+    ring_leds: 24,
+};
 
 /// Which raw ids belong to the round buttons.
 ///
@@ -42,7 +48,11 @@ pub struct ButtonMap {
 
 impl Default for ButtonMap {
     fn default() -> Self {
-        Self { left: 0x25, middle: 0x30, right: 0x31 }
+        Self {
+            left: 0x25,
+            middle: 0x30,
+            right: 0x31,
+        }
     }
 }
 
@@ -58,7 +68,13 @@ pub struct M18<T: Transport> {
 
 impl<T: Transport> M18<T> {
     pub fn new(t: T) -> Self {
-        Self { t, buttons: ButtonMap::default(), brightness: 80, ring_frame: None, ring_brightness: None }
+        Self {
+            t,
+            buttons: ButtonMap::default(),
+            brightness: 80,
+            ring_frame: None,
+            ring_brightness: None,
+        }
     }
 
     pub fn layout(&self) -> Layout {
@@ -67,7 +83,10 @@ impl<T: Transport> M18<T> {
 
     fn raw(&mut self, payload: &[u8]) -> Result<()> {
         if payload.len() > OUT_LEN {
-            return Err(Error::TooLong { len: payload.len(), max: OUT_LEN });
+            return Err(Error::TooLong {
+                len: payload.len(),
+                max: OUT_LEN,
+            });
         }
         self.t.write(payload)
     }
@@ -120,8 +139,10 @@ impl<T: Transport> M18<T> {
     /// left, row by row. Use [`crate::keyimage`] to make the JPEG.
     pub fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()> {
         let id = image_id(key)?;
-        let len = u16::try_from(jpeg.len())
-            .map_err(|_| Error::TooLong { len: jpeg.len(), max: u16::MAX as usize })?;
+        let len = u16::try_from(jpeg.len()).map_err(|_| Error::TooLong {
+            len: jpeg.len(),
+            max: u16::MAX as usize,
+        })?;
         let [hi, lo] = len.to_be_bytes();
         self.cmd(&[b'B', b'A', b'T', 0, 0, hi, lo, id])?;
         for page in jpeg.chunks(OUT_LEN) {
@@ -225,7 +246,11 @@ pub fn parse_event(report: &[u8], buttons: &ButtonMap) -> Option<InputEvent> {
         _ if id == buttons.right => Control::Button(Button::Right),
         _ => Control::Unknown(id),
     };
-    Some(InputEvent { control, pressed: state == 1, raw_id: id })
+    Some(InputEvent {
+        control,
+        pressed: state == 1,
+        raw_id: id,
+    })
 }
 
 #[cfg(test)]
@@ -303,7 +328,17 @@ mod tests {
         d.keepalive().unwrap();
         let w = d.into_transport().written;
         let names: Vec<&[u8]> = w.iter().map(|m| &m[5..10]).collect();
-        assert_eq!(names, [&b"SETLB"[..], b"LBLIG", b"SETLB", b"LBLIG", b"SETLB", b"LIG\0\0"]);
+        assert_eq!(
+            names,
+            [
+                &b"SETLB"[..],
+                b"LBLIG",
+                b"SETLB",
+                b"LBLIG",
+                b"SETLB",
+                b"LIG\0\0"
+            ]
+        );
         assert_eq!(w[3], b"CRT\0\0LBLIG\x28");
     }
 
@@ -320,11 +355,26 @@ mod tests {
         let e = parse_event(&report(0x01, 1), &b).unwrap();
         assert_eq!(e.control, Control::Key(0));
         assert!(e.pressed);
-        assert_eq!(parse_event(&report(0x0F, 0), &b).unwrap().control, Control::Key(14));
-        assert_eq!(parse_event(&report(0x25, 1), &b).unwrap().control, Control::Button(Button::Left));
-        assert_eq!(parse_event(&report(0x30, 1), &b).unwrap().control, Control::Button(Button::Middle));
-        assert_eq!(parse_event(&report(0x31, 1), &b).unwrap().control, Control::Button(Button::Right));
-        assert_eq!(parse_event(&report(0x40, 1), &b).unwrap().control, Control::Unknown(0x40));
+        assert_eq!(
+            parse_event(&report(0x0F, 0), &b).unwrap().control,
+            Control::Key(14)
+        );
+        assert_eq!(
+            parse_event(&report(0x25, 1), &b).unwrap().control,
+            Control::Button(Button::Left)
+        );
+        assert_eq!(
+            parse_event(&report(0x30, 1), &b).unwrap().control,
+            Control::Button(Button::Middle)
+        );
+        assert_eq!(
+            parse_event(&report(0x31, 1), &b).unwrap().control,
+            Control::Button(Button::Right)
+        );
+        assert_eq!(
+            parse_event(&report(0x40, 1), &b).unwrap().control,
+            Control::Unknown(0x40)
+        );
         assert!(parse_event(b"NAK", &b).is_none());
     }
 }

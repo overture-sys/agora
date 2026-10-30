@@ -9,6 +9,7 @@
 //! The app talks to the host through [`HostHandle`] and gets key faces and
 //! other requests back as [`HostEvent`]s.
 
+pub mod builtin;
 pub mod face;
 mod host;
 mod launch;
@@ -16,7 +17,10 @@ pub mod manifest;
 mod server;
 
 pub use face::{Face, Overlay};
-pub use host::{ActionInfo, DeviceDesc, HostEvent, HostHandle, KeyInfo, PluginInfo};
+pub use host::{
+    ActionInfo, DeviceDesc, HostEvent, HostHandle, KeyInfo, LayoutOp, LayoutView, Look, NameId,
+    PluginInfo,
+};
 pub use manifest::{Plugin, Source};
 
 use std::path::PathBuf;

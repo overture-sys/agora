@@ -52,7 +52,11 @@ fn glyph(c: char) -> Option<[u8; 7]> {
 /// Width in pixels of `text` drawn at `scale`, with one column between glyphs.
 pub fn text_width(text: &str, scale: u32) -> u32 {
     let n = text.chars().count() as u32;
-    if n == 0 { 0 } else { (n * 6 - 1) * scale }
+    if n == 0 {
+        0
+    } else {
+        (n * 6 - 1) * scale
+    }
 }
 
 /// Calls `put(x, y)` for every lit pixel of `text` drawn at (`x0`, `y0`).

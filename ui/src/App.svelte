@@ -5,8 +5,8 @@
 
   type Status = { connected: boolean; model: string | null; rows: number; columns: number; message: string };
   type Input = { kind: "key" | "button" | "unknown"; index: number; pressed: boolean; raw_id: number };
-  type Action = { plugin: string; plugin_name: string; category: string; action: string; name: string; tooltip: string; icon: string | null };
-  type Plugin = { uuid: string; name: string; version: string; source: string; kind: string; status: string };
+  type Action = { plugin: string; plugin_name: string; category: string; action: string; name: string; tooltip: string; icon: string | null; group_icon: string | null };
+  type Plugin = { uuid: string; name: string; version: string; source: string; kind: string; status: string; dir: string; hidden: boolean };
   type KeyInfo = { key: number; plugin: string; plugin_name: string; action: string; name: string; settings_url: string | null };
   type Preview = { key: number; image: string | null };
   type Line = { plugin: string; message: string };
@@ -21,6 +21,22 @@
   let info = $state<KeyInfo | null>(null);
   let picking = $state(false);
   let search = $state("");
+  // Plugin groups the person has opened in the action list.
+  let openGroups = $state(new Set<string>());
+
+  function toggleGroup(g: string) {
+    const next = new Set(openGroups);
+    next.has(g) ? next.delete(g) : next.add(g);
+    openGroups = next;
+    try {
+      localStorage.setItem("agora.openGroups", JSON.stringify([...next]));
+    } catch {}
+  }
+
+  try {
+    const saved = JSON.parse(localStorage.getItem("agora.openGroups") ?? "[]");
+    if (Array.isArray(saved)) openGroups = new Set(saved);
+  } catch {}
   let log = $state<string[]>([]);
   let brightness = $state(80);
   let ringColor = $state("#0050ff");
@@ -58,6 +74,30 @@
     await call("clear_key", { key: selected });
     await loadKey(selected);
     setTimeout(refreshPlugins, 500);
+  }
+
+  // The plugin whose Delete was clicked once and now asks to be sure.
+  let confirming = $state<string | null>(null);
+
+  async function removePlugin(p: Plugin) {
+    if (confirming !== p.uuid) {
+      confirming = p.uuid;
+      return;
+    }
+    confirming = null;
+    await call("remove_plugin", { uuid: p.uuid });
+    await afterPluginChange();
+  }
+
+  async function showPlugin(p: Plugin) {
+    await call("show_plugin", { uuid: p.uuid });
+    await afterPluginChange();
+  }
+
+  async function afterPluginChange() {
+    actions = (await call<Action[]>("list_actions")) ?? [];
+    await refreshPlugins();
+    await loadKey(selected);
   }
 
   async function refreshPlugins() {
@@ -199,12 +239,35 @@
     </section>
 
     <section class="plugins">
-      <h2>Plugins</h2>
+      <div class="side-head">
+        <h2>Plugins</h2>
+        <button onclick={() => call("open_plugins_folder")}>Open plugins folder</button>
+      </div>
       {#if plugins.length === 0}<p class="muted">No plugins found. Put plugin folders in %APPDATA%\Agora\plugins.</p>{/if}
       {#each plugins as p}
-        <div class="plugin">
-          <span>{p.name} <span class="muted">{p.version}</span></span>
-          <span class="muted">{p.source === "VsdCraft" ? "from VSD Craft" : "Agora"} · {p.status}</span>
+        <div class="plugin" class:hidden={p.hidden}>
+          <div class="plugin-text">
+            <span>{p.name} <span class="muted">{p.version}</span></span>
+            <span class="muted small">
+              {p.source === "Agora" ? "Agora" : "from VSD Craft"} · {p.hidden ? "hidden" : p.status}
+            </span>
+          </div>
+          <div class="row">
+            <button class="small" onclick={() => call("open_plugin_folder", { uuid: p.uuid })}>Open folder</button>
+            {#if p.hidden}
+              <button class="small" onclick={() => showPlugin(p)}>Show</button>
+            {:else if p.source === "Agora"}
+              <button class="small danger" class:sure={confirming === p.uuid} onclick={() => removePlugin(p)}
+                title="Moves the plugin to the Recycle Bin and clears its keys"
+                >{confirming === p.uuid ? "Sure? Delete" : "Delete"}</button
+              >
+            {:else}
+              <button class="small" class:sure={confirming === p.uuid} onclick={() => removePlugin(p)}
+                title="VSD Craft's plugins are never deleted by Agora. Hiding takes it out of the action list and clears its keys."
+                >{confirming === p.uuid ? "Sure? Hide" : "Hide"}</button
+              >
+            {/if}
+          </div>
         </div>
       {/each}
     </section>
@@ -220,26 +283,36 @@
       <p class="muted hint">Click an action, or drag it onto any key. Drag a key onto another key to move it (two used keys swap).</p>
       <div class="actions">
         {#each groups as [group, list]}
-          <h3>{group}</h3>
-          {#each list as a}
-            <button
-              class="action"
-              draggable="true"
-              ondragstart={(e) => {
-                dragged = a;
-                e.dataTransfer?.setData("text/plain", `action:${a.action}`);
-              }}
-              ondragend={() => {
-                dragged = null;
-                dropTarget = null;
-              }}
-              onclick={() => place(selected, a)}
-              title={a.tooltip}
-            >
-              {#if a.icon}<img src={a.icon} alt="" />{:else}<span class="noicon"></span>{/if}
-              <span>{a.name}</span>
-            </button>
-          {/each}
+          {@const open = openGroups.has(group) || search.trim() !== ""}
+          <button class="group" class:open onclick={() => toggleGroup(group)} aria-expanded={open}>
+            <span class="chevron">▸</span>
+            {#if list[0].group_icon}<img src={list[0].group_icon} alt="" />{:else}<span class="noicon"></span>{/if}
+            <span class="group-name">{group}</span>
+            <span class="count">{list.length}</span>
+          </button>
+          {#if open}
+            <div class="group-items">
+              {#each list as a}
+                <button
+                  class="action"
+                  draggable="true"
+                  ondragstart={(e) => {
+                    dragged = a;
+                    e.dataTransfer?.setData("text/plain", `action:${a.action}`);
+                  }}
+                  ondragend={() => {
+                    dragged = null;
+                    dropTarget = null;
+                  }}
+                  onclick={() => place(selected, a)}
+                  title={a.tooltip}
+                >
+                  {#if a.icon}<img src={a.icon} alt="" />{:else}<span class="noicon"></span>{/if}
+                  <span>{a.name}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         {/each}
       </div>
     {:else if info}

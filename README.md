@@ -14,7 +14,7 @@ Agora and VSD Craft can't use the dock at the same time. Close VSD Craft (Stream
 
 Plugins are read from `%APPDATA%\Agora\plugins` first, then from VSD Craft's plugin folder (`%APPDATA%\HotSpot\StreamDock\plugins`), which Agora never changes. Key layout and plugin settings are saved in `%APPDATA%\Agora\layout.json`; plugin output goes to `%APPDATA%\Agora\logs`.
 
-Node.js plugins need Node.js 20 or newer. Agora uses, in order: the `AGORA_NODE` environment variable, `node\node.exe` next to `agora.exe`, then `node` on PATH.
+Node.js plugins need Node.js 20 or newer. Agora uses, in order: the `AGORA_NODE` environment variable, `node\node.exe` next to `agora.exe`, `node` on PATH, then the Node 20 that VSD Craft installs.
 
 Profiles, pages, folders, multi-actions and the round buttons come in the next phases. See the blueprint in the project notes.
 

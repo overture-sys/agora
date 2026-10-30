@@ -51,6 +51,8 @@ pub struct ActionInfo {
     pub tooltip: String,
     /// The action list icon as a data URI, if the plugin has one.
     pub icon: Option<String>,
+    /// The plugin's (category's) icon for its group in the list.
+    pub group_icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +63,11 @@ pub struct PluginInfo {
     pub source: String,
     pub kind: String,
     pub status: String,
+    /// The plugin's folder.
+    pub dir: String,
+    /// Hidden from the action list (used for VSD Craft's plugins, which
+    /// Agora never deletes).
+    pub hidden: bool,
 }
 
 /// What's on a key, for the editor.
@@ -103,6 +110,9 @@ struct Layout {
     keys: BTreeMap<usize, Instance>,
     #[serde(default)]
     global_settings: HashMap<String, Value>,
+    /// Plugins hidden from the action list.
+    #[serde(default)]
+    hidden: std::collections::BTreeSet<String>,
 }
 
 pub(crate) type ConnId = u64;
@@ -116,6 +126,8 @@ pub(crate) enum Msg {
     Place(usize, String, String, oneshot::Sender<Result<(), String>>),
     Clear(usize),
     Move(usize, usize),
+    SetHidden(String, bool),
+    Forget(String, oneshot::Sender<Option<PathBuf>>),
     Key(usize, bool),
     DeviceConnected(bool),
     Actions(oneshot::Sender<Vec<ActionInfo>>),
@@ -186,6 +198,18 @@ impl HostHandle {
 
     pub fn clear(&self, key: usize) {
         let _ = self.tx.send(Msg::Clear(key));
+    }
+
+    /// Hides a plugin from the action list (or shows it again). Hiding
+    /// clears the keys that use it.
+    pub fn set_hidden(&self, plugin: &str, hidden: bool) {
+        let _ = self.tx.send(Msg::SetHidden(plugin.into(), hidden));
+    }
+
+    /// Stops a plugin, clears its keys and drops it from the host, so its
+    /// folder can be deleted. Returns the folder.
+    pub fn forget(&self, plugin: &str) -> Option<PathBuf> {
+        self.ask(|o| Msg::Forget(plugin.into(), o)).flatten()
     }
 
     /// Moves the action on `from` to `to`. Whatever was on `to` swaps to `from`.
@@ -355,6 +379,23 @@ impl State {
             }
             Msg::Clear(key) => self.clear(key),
             Msg::Move(from, to) => self.move_key(from, to),
+            Msg::SetHidden(uuid, hidden) => {
+                if hidden {
+                    self.clear_plugin_keys(&uuid);
+                    self.layout.hidden.insert(uuid);
+                } else {
+                    self.layout.hidden.remove(&uuid);
+                }
+                self.dirty = true;
+            }
+            Msg::Forget(uuid, done) => {
+                self.clear_plugin_keys(&uuid);
+                self.stop_plugin(&uuid);
+                self.layout.global_settings.remove(&uuid);
+                self.layout.hidden.remove(&uuid);
+                self.dirty = true;
+                let _ = done.send(self.plugins.remove(&uuid).map(|p| p.dir));
+            }
             Msg::Key(key, pressed) => self.on_key(key, pressed),
             Msg::DeviceConnected(c) => self.on_device(c),
             Msg::Actions(done) => {
@@ -665,6 +706,13 @@ impl State {
         }
     }
 
+    fn clear_plugin_keys(&mut self, uuid: &str) {
+        let keys: Vec<usize> = self.layout.keys.iter().filter(|(_, i)| i.plugin == uuid).map(|(k, _)| *k).collect();
+        for k in keys {
+            self.clear(k);
+        }
+    }
+
     fn move_key(&mut self, from: usize, to: usize) {
         let count = self.config.device.rows * self.config.device.columns;
         if from == to || from >= count || to >= count || !self.layout.keys.contains_key(&from) {
@@ -732,7 +780,10 @@ impl State {
     fn action_list(&mut self) -> Vec<ActionInfo> {
         let mut out = Vec::new();
         let plugins: Vec<Plugin> = self.plugins.values().cloned().collect();
-        for p in plugins {
+        let hidden = self.layout.hidden.clone();
+        for p in plugins.into_iter().filter(|p| !hidden.contains(&p.uuid)) {
+            let group_rel = p.manifest.category_icon.clone().unwrap_or_else(|| p.manifest.icon.clone());
+            let group_icon = self.manifest_image(&p.uuid, &group_rel);
             for a in p.manifest.actions.iter().filter(|a| a.visible_in_actions_list) {
                 let keypad = a.controllers.is_empty() || a.controllers.iter().any(|c| c == "Keypad");
                 if !keypad {
@@ -746,6 +797,7 @@ impl State {
                     name: a.name.clone(),
                     tooltip: a.tooltip.clone(),
                     icon: self.manifest_image(&p.uuid, &a.icon),
+                    group_icon: group_icon.clone(),
                 });
             }
         }
@@ -770,6 +822,8 @@ impl State {
                     None => "unsupported".into(),
                 },
                 status: self.status.get(&p.uuid).cloned().unwrap_or_else(|| "not running".into()),
+                dir: p.dir.display().to_string(),
+                hidden: self.layout.hidden.contains(&p.uuid),
             })
             .collect()
     }

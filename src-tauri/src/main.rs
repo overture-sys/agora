@@ -164,14 +164,27 @@ fn data_dir(app: &AppHandle) -> PathBuf {
 }
 
 /// Node.js for Node plugins: AGORA_NODE, then node\node.exe next to Agora,
-/// then whatever is on PATH (the host's default).
+/// then node on PATH, then the Node 20 that VSD Craft ships.
 fn find_node() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("AGORA_NODE").map(PathBuf::from).filter(|p| p.is_file()) {
         return Some(p);
     }
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let bundled = exe_dir.join("node").join(if cfg!(windows) { "node.exe" } else { "node" });
-    bundled.is_file().then_some(bundled)
+    let exe = if cfg!(windows) { "node.exe" } else { "node" };
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("node"))) {
+        if dir.join(exe).is_file() {
+            return Some(dir.join(exe));
+        }
+    }
+    let on_path = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file()))
+        .unwrap_or(false);
+    if on_path {
+        // The host runs plain "node" from PATH.
+        return None;
+    }
+    std::env::var_os("ProgramFiles(x86)")
+        .map(|pf| PathBuf::from(pf).join("VSD Craft").join("node").join("node20.exe"))
+        .filter(|p| p.is_file())
 }
 
 fn start_host(app: &AppHandle) -> Result<(HostHandle, Receiver<HostEvent>), String> {
@@ -209,6 +222,56 @@ fn open_url(url: &str) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
     let _ = cmd;
+}
+
+/// Shows a folder in Explorer (or the system file manager).
+fn open_folder(dir: &std::path::Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!("{} doesn't exist", dir.display()));
+    }
+    #[cfg(windows)]
+    let cmd = std::process::Command::new("explorer.exe").arg(dir).spawn();
+    #[cfg(target_os = "macos")]
+    let cmd = std::process::Command::new("open").arg(dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = std::process::Command::new("xdg-open").arg(dir).spawn();
+    cmd.map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn plugin_dir(host: &State<Host>, uuid: &str) -> Result<(PathBuf, String), String> {
+    let plugins = with_host(host, |h| h.plugins())?;
+    let p = plugins.into_iter().find(|p| p.uuid == uuid).ok_or("That plugin isn't loaded")?;
+    Ok((PathBuf::from(p.dir), p.source))
+}
+
+#[tauri::command]
+fn open_plugins_folder(app: AppHandle) -> Result<(), String> {
+    open_folder(&data_dir(&app).join("plugins"))
+}
+
+#[tauri::command]
+fn open_plugin_folder(host: State<Host>, uuid: String) -> Result<(), String> {
+    open_folder(&plugin_dir(&host, &uuid)?.0)
+}
+
+/// Removes a plugin. One in Agora's folder goes to the Recycle Bin. One
+/// from VSD Craft's folder is only hidden: Agora never changes VSD Craft's
+/// files. Returns "deleted" or "hidden".
+#[tauri::command]
+fn remove_plugin(host: State<Host>, uuid: String) -> Result<String, String> {
+    let (dir, source) = plugin_dir(&host, &uuid)?;
+    if source != "Agora" {
+        with_host(&host, |h| h.set_hidden(&uuid, true))?;
+        return Ok("hidden".into());
+    }
+    with_host(&host, |h| h.forget(&uuid))?;
+    trash::delete(&dir).map_err(|e| format!("Agora stopped the plugin but couldn't delete its folder: {e}"))?;
+    Ok("deleted".into())
+}
+
+#[tauri::command]
+fn show_plugin(host: State<Host>, uuid: String) -> Result<(), String> {
+    with_host(&host, |h| h.set_hidden(&uuid, false))
 }
 
 fn html_plugin_label(plugin: &str) -> String {
@@ -382,6 +445,10 @@ fn main() {
             place_action,
             clear_key,
             move_key,
+            open_plugins_folder,
+            open_plugin_folder,
+            remove_plugin,
+            show_plugin,
             key_previews
         ])
         .setup(move |app| {

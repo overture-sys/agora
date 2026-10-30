@@ -65,13 +65,27 @@ button:disabled { opacity: 0.5; cursor: default; }
 .search { width: 100%; font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
 .error { color: var(--bad); margin: 0; font-size: 14px; }
 
-.plugin { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; padding: 4px 0; border-top: 1px solid var(--line); }
+.plugin { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 14px; padding: 6px 0; border-top: 1px solid var(--line); }
+.plugin.hidden { opacity: 0.6; }
+.plugin-text { display: flex; flex-direction: column; min-width: 0; }
+.small { font-size: 12px; }
+button.small { padding: 3px 8px; }
+button.danger { color: var(--bad); }
+button.sure { background: var(--bad); color: #fff; border-color: var(--bad); }
 
 .side { display: flex; flex-direction: column; min-height: 0; gap: 8px; }
 .side-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
 .side-head h2 { color: var(--text); margin: 0; }
 .hint { margin: 0; font-size: 13px; }
 .actions { overflow: auto; min-height: 0; flex: 1; }
+.group { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: none; background: transparent; padding: 8px 6px; font-weight: 600; border-top: 1px solid var(--line); border-radius: 0; }
+.group:hover { background: var(--bg); }
+.group img { width: 26px; height: 26px; border-radius: 6px; flex: none; background: var(--key); padding: 3px; }
+.group-name { flex: 1; }
+.count { color: var(--muted); font-weight: 400; font-size: 12px; }
+.chevron { width: 12px; color: var(--muted); transition: transform 120ms; }
+.group.open .chevron { transform: rotate(90deg); }
+.group-items { padding-left: 22px; padding-bottom: 6px; }
 .action { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: none; background: transparent; padding: 6px; }
 .action:hover { background: var(--bg); }
 .action img, .noicon { width: 30px; height: 30px; border-radius: 6px; flex: none; background: var(--key); padding: 3px; }

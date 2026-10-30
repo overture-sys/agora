@@ -160,3 +160,29 @@ fn moving_a_key_keeps_the_action_and_swaps() {
     assert_eq!(ctx(&host.key_info(1).unwrap().settings_url.unwrap()), ctx(&moved));
     assert!(host.key_info(3).is_some());
 }
+
+#[test]
+fn hiding_and_forgetting_plugins() {
+    if !node_ok() {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.place(2, "com.agora.testplugin", "com.agora.testplugin.counter").unwrap();
+    wait_for(&rx, 10, |e| matches!(e, HostEvent::Face { key: 2, face } if face.title == "hello"));
+
+    // Hiding clears its keys and takes its actions out of the list.
+    host.set_hidden("com.agora.testplugin", true);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::PluginStatus { status, .. } if status == "stopped"));
+    assert!(host.key_info(2).is_none());
+    assert!(host.actions().is_empty());
+    assert!(host.plugins()[0].hidden);
+    host.set_hidden("com.agora.testplugin", false);
+    assert_eq!(host.actions().len(), 1);
+
+    // Forgetting drops it and hands back its folder.
+    let dir = host.forget("com.agora.testplugin").unwrap();
+    assert!(dir.ends_with("com.agora.testplugin.sdPlugin"));
+    assert!(host.plugins().is_empty());
+    assert!(host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter").is_err());
+}

@@ -39,7 +39,9 @@
   let previews = $state<Record<number, string>>({});
   let actions = $state<Action[]>([]);
   let plugins = $state<Plugin[]>([]);
-  let selected = $state<number>(0);
+  // The key being edited; null shows the Keys overview.
+  let selected = $state<number | null>(null);
+  let keyInfos = $state<Record<number, KeyInfo>>({});
   let info = $state<KeyInfo | null>(null);
   let picking = $state(false);
   let search = $state("");
@@ -87,8 +89,14 @@
 
   // ---- keys ----
 
-  async function loadKey(k: number) {
+  async function loadKey(k: number | null) {
     selected = k;
+    search = "";
+    if (k === null) {
+      info = null;
+      picking = false;
+      return;
+    }
     info = (await call<KeyInfo | null>("key_info", { key: k })) ?? null;
     picking = info === null;
   }
@@ -98,15 +106,42 @@
     loadKey(k);
   }
 
+  function clickKey(k: number) {
+    // Clicking the open key again goes back to the overview.
+    loadKey(selected === k ? null : k);
+  }
+
+  async function loadOverview() {
+    const list = await Promise.all(
+      Array.from({ length: keyCount }, (_, k) => invoke<KeyInfo | null>("key_info", { key: k }).catch(() => null)),
+    );
+    const next: Record<number, KeyInfo> = {};
+    list.forEach((ki, k) => ki && (next[k] = ki));
+    keyInfos = next;
+  }
+
   async function place(k: number, a: Action) {
     await call("place_action", { key: k, plugin: a.plugin, action: a.action });
     await loadKey(k);
+    loadOverview();
     refreshPlugins();
   }
 
+  /// From the overview: puts an action on the first free key.
+  async function placeOnFreeKey(a: Action) {
+    const free = Array.from({ length: keyCount }, (_, k) => k).find((k) => !keyInfos[k]);
+    if (free === undefined) {
+      error = "Every key is in use. Drag the action onto a key to replace it.";
+      return;
+    }
+    await place(free, a);
+  }
+
   async function removeKey() {
+    if (selected === null) return;
     await call("clear_key", { key: selected });
     await loadKey(selected);
+    loadOverview();
     setTimeout(refreshPlugins, 500);
   }
 
@@ -124,6 +159,7 @@
       await call("move_key", { from, to: k });
       // Keep the moved action selected.
       await loadKey(selected === from ? k : selected === k ? from : selected);
+      loadOverview();
     }
     dragged = null;
     draggedKey = null;
@@ -150,6 +186,7 @@
     actions = (await call<Action[]>("list_actions")) ?? [];
     await refreshPlugins();
     await loadKey(selected);
+    await loadOverview();
   }
 
   async function removePlugin(p: Plugin) {
@@ -229,7 +266,11 @@
     call<Settings>("get_settings").then((s) => s && (settings = s));
     call<Action[]>("list_actions").then((a) => (actions = a ?? []));
     refreshPlugins();
-    loadKey(0);
+    loadOverview();
+    const onKeydown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && page === "keys") loadKey(null);
+    };
+    window.addEventListener("keydown", onKeydown);
     // The status also comes as events; this catches any the window missed
     // while it was hidden in the tray.
     const poll = setInterval(refreshStatus, 2000);
@@ -266,6 +307,7 @@
       clearInterval(poll);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
+      window.removeEventListener("keydown", onKeydown);
       offs.forEach((p) => p.then((off) => off()));
     };
   });
@@ -279,7 +321,7 @@
         class:pressed={pressedKeys.has(k)}
         class:selected={editable && selected === k}
         class:drop={dropTarget === k}
-        onclick={() => (editable ? loadKey(k) : openKey(k))}
+        onclick={() => (editable ? clickKey(k) : openKey(k))}
         draggable={editable && previews[k] ? "true" : "false"}
         ondragstart={(e) => {
           draggedKey = k;
@@ -318,6 +360,47 @@
       <div class="round" class:pressed={pressedButtons.has(b)} title="{name} button"></div>
     {/each}
   </div>
+{/snippet}
+
+{#snippet library()}
+    <input class="search" placeholder="Search actions" bind:value={search} />
+                <div class="actions">
+      {#if actions.length === 0}
+        <p class="muted">No actions yet. Add plugins on the Plugins page.</p>
+      {/if}
+      {#each groups as [group, list]}
+        {@const open = openGroups.has(group) || search.trim() !== ""}
+        <button class="group" class:open onclick={() => toggleGroup(group)} aria-expanded={open}>
+          <span class="chevron">▸</span>
+          {#if list[0].group_icon}<img src={list[0].group_icon} alt="" />{:else}<span class="noicon"></span>{/if}
+          <span class="group-name">{group}</span>
+          <span class="count">{list.length}</span>
+        </button>
+        {#if open}
+          <div class="group-items">
+            {#each list as a}
+              <button
+                class="action"
+                draggable="true"
+                ondragstart={(e) => {
+                  dragged = a;
+                  e.dataTransfer?.setData("text/plain", `action:${a.action}`);
+                }}
+                ondragend={() => {
+                  dragged = null;
+                  dropTarget = null;
+                }}
+                onclick={() => (selected === null ? placeOnFreeKey(a) : place(selected, a))}
+                title={a.tooltip}
+              >
+                {#if a.icon}<img src={a.icon} alt="" />{:else}<span class="noicon"></span>{/if}
+                <span>{a.name}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      {/each}
+    </div>
 {/snippet}
 
 {#snippet activity(limit: number)}
@@ -400,59 +483,46 @@
 
         <section class="side">
           <div class="triglyph"></div>
-          {#if picking}
+          {#if selected === null}
+            <div class="side-head">
+              <div>
+                <h2>Your keys</h2>
+                <div class="muted">{Object.keys(keyInfos).length} of {keyCount} set up. Click a key to edit it.</div>
+              </div>
+            </div>
+            {#if Object.keys(keyInfos).length > 0}
+              <div class="key-list">
+                {#each Object.values(keyInfos) as ki (ki.key)}
+                  <button class="key-row" onclick={() => loadKey(ki.key)}>
+                    {#if previews[ki.key]}<img src={previews[ki.key]} alt="" />{:else}<span class="noicon"></span>{/if}
+                    <span class="key-row-text"><b><span class="k">Key {ki.key + 1}</span> · {ki.name}</b><span class="muted small">{ki.plugin_name}</span></span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+            <h2 class="lib-head">Action library</h2>
+            <p class="muted hint">Drag an action onto a key, or click it to use the first free key. Drag keys onto each other to move or swap them.</p>
+            {@render library()}
+          {:else if picking}
             <div class="side-head">
               <h2>Pick an action for key <span class="k">{selected + 1}</span></h2>
-              {#if info}<button onclick={() => (picking = false)}>Cancel</button>{/if}
+              <div class="row">
+                {#if info}<button onclick={() => (picking = false)}>Cancel</button>{/if}
+                <button onclick={() => loadKey(null)}>All keys</button>
+              </div>
             </div>
-            <input class="search" placeholder="Search actions" bind:value={search} />
-            <p class="muted hint">Click an action, or drag it onto any key. Drag a key onto another key to move it (two used keys swap).</p>
-            <div class="actions">
-              {#if actions.length === 0}
-                <p class="muted">No actions yet. Add plugins on the Plugins page.</p>
-              {/if}
-              {#each groups as [group, list]}
-                {@const open = openGroups.has(group) || search.trim() !== ""}
-                <button class="group" class:open onclick={() => toggleGroup(group)} aria-expanded={open}>
-                  <span class="chevron">▸</span>
-                  {#if list[0].group_icon}<img src={list[0].group_icon} alt="" />{:else}<span class="noicon"></span>{/if}
-                  <span class="group-name">{group}</span>
-                  <span class="count">{list.length}</span>
-                </button>
-                {#if open}
-                  <div class="group-items">
-                    {#each list as a}
-                      <button
-                        class="action"
-                        draggable="true"
-                        ondragstart={(e) => {
-                          dragged = a;
-                          e.dataTransfer?.setData("text/plain", `action:${a.action}`);
-                        }}
-                        ondragend={() => {
-                          dragged = null;
-                          dropTarget = null;
-                        }}
-                        onclick={() => place(selected, a)}
-                        title={a.tooltip}
-                      >
-                        {#if a.icon}<img src={a.icon} alt="" />{:else}<span class="noicon"></span>{/if}
-                        <span>{a.name}</span>
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
-              {/each}
-            </div>
+            <p class="muted hint">Click an action to put it on key {(selected ?? 0) + 1}, or drag it onto any key.</p>
+            {@render library()}
           {:else if info}
             <div class="side-head">
               <div>
-                <h2><span class="k">Key {selected + 1}</span> · {info.name}</h2>
+                <h2><span class="k">Key {(selected ?? 0) + 1}</span> · {info.name}</h2>
                 <div class="muted">{info.plugin_name}</div>
               </div>
               <div class="row">
                 <button class="primary" onclick={() => (picking = true)}>Change</button>
                 <button class="danger" onclick={removeKey}>Remove</button>
+                <button onclick={() => loadKey(null)} title="Back to the overview (Esc)">All keys</button>
               </div>
             </div>
             {#if info.settings_url}

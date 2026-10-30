@@ -211,6 +211,16 @@ button.small { font-size: 12px; padding: 3px 8px; }
 .action:hover { background: var(--bg); }
 .pi { flex: 1; width: 100%; min-height: 300px; border: 1px solid var(--line); border-radius: 8px; background: var(--pi-bg); }
 
+/* Keys overview */
+.key-list { display: flex; flex-direction: column; gap: 2px; max-height: 40%; overflow: auto; flex: none; }
+.key-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: none; background: transparent; padding: 5px 6px; border-radius: 6px; }
+.key-row:hover { background: var(--bg); }
+.key-row img { width: 34px; height: 34px; border-radius: 6px; flex: none; }
+.key-row-text { display: flex; flex-direction: column; min-width: 0; }
+.key-row-text b { font-weight: 500; }
+.key-row .k, .side .k { font-family: var(--display); font-weight: 400; color: var(--accent); letter-spacing: .06em; }
+.lib-head { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--line); }
+
 /* Activity as ostraka */
 .lines { display: flex; flex-wrap: wrap; gap: 8px; max-height: 240px; overflow: auto; }
 .ostrakon {

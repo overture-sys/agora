@@ -14,7 +14,7 @@ use agora_device::worker::{Command, DockWorker, Event};
 use agora_device::{discover, Button, Control, Rgb};
 use agora_host::{face, manifest, ActionInfo, Config, DeviceDesc, HostEvent, HostHandle, KeyInfo, PluginInfo, Source};
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -23,13 +23,97 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 const KEY_SIZE: u32 = 64;
 
 /// The connected dock, if any. The connection thread fills and clears it.
-#[derive(Default)]
+/// What Agora remembers between runs, in %APPDATA%\Agora\settings.json.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct Settings {
+    brightness: u8,
+    ring_color: String,
+    ring_on: bool,
+    ring_brightness: u8,
+    /// Also load the plugins installed for VSD Craft (read only). Off while
+    /// Agora is being built and tested.
+    use_vsd_craft_plugins: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            brightness: 80,
+            ring_color: "#d9794a".into(),
+            ring_on: false,
+            ring_brightness: 100,
+            use_vsd_craft_plugins: false,
+        }
+    }
+}
+
+fn load_settings(path: &std::path::Path) -> Settings {
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_settings(path: &std::path::Path, settings: &Settings) {
+    if let Ok(text) = serde_json::to_string_pretty(settings) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+fn hex_rgb(color: &str) -> Rgb {
+    let hex = color.trim_start_matches('#');
+    let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0);
+    Rgb(byte(0), byte(2), byte(4))
+}
+
+/// Puts the saved brightness and ring on a freshly opened dock.
+fn apply_settings(worker: &DockWorker, s: &Settings) {
+    worker.send(Command::Brightness(s.brightness));
+    if s.ring_on {
+        worker.send(Command::Ring(vec![hex_rgb(&s.ring_color); 24]));
+        worker.send(Command::RingBrightness(s.ring_brightness));
+    }
+}
+
 struct Dock {
     worker: Option<DockWorker>,
     model: Option<String>,
     orientation: Orientation,
     /// The last connection message, for a window that opens later.
     message: String,
+    settings: Settings,
+    settings_path: PathBuf,
+}
+
+impl Default for Dock {
+    fn default() -> Self {
+        Self {
+            worker: None,
+            model: None,
+            orientation: Orientation::default(),
+            message: String::new(),
+            settings: Settings::default(),
+            settings_path: PathBuf::from("settings.json"),
+        }
+    }
+}
+
+impl Dock {
+    /// Changes a setting, saves it, and sends `cmd` if a dock is connected.
+    fn change(&mut self, edit: impl FnOnce(&mut Settings), cmds: Vec<Command>) -> Result<(), String> {
+        edit(&mut self.settings);
+        save_settings(&self.settings_path, &self.settings);
+        match &self.worker {
+            Some(w) => {
+                for c in cmds {
+                    w.send(c);
+                }
+                Ok(())
+            }
+            None => Err("Saved. It goes on the dock when one is connected.".into()),
+        }
+    }
 }
 
 type Shared = Arc<Mutex<Dock>>;
@@ -82,14 +166,6 @@ fn status(dock: &Dock, message: impl Into<String>) -> Status {
     }
 }
 
-fn send(state: &State<Shared>, cmd: Command) -> Result<(), String> {
-    let dock = state.lock().unwrap();
-    match &dock.worker {
-        Some(w) if w.send(cmd) => Ok(()),
-        _ => Err("No dock connected".into()),
-    }
-}
-
 fn with_host<T>(host: &State<Host>, f: impl FnOnce(&HostHandle) -> T) -> Result<T, String> {
     let guard = host.lock().unwrap();
     guard.as_ref().map(f).ok_or_else(|| "The plugin host isn't running".to_string())
@@ -103,20 +179,52 @@ fn dock_status(state: State<Shared>) -> Status {
 
 #[tauri::command]
 fn set_brightness(state: State<Shared>, percent: u8) -> Result<(), String> {
-    send(&state, Command::Brightness(percent))
+    state.lock().unwrap().change(|s| s.brightness = percent.min(100), vec![Command::Brightness(percent)])
 }
 
-/// `color` is "#rrggbb". Lights the whole ring.
+#[tauri::command]
+fn get_settings(state: State<Shared>) -> Settings {
+    state.lock().unwrap().settings.clone()
+}
+
+/// `color` is "#rrggbb". Lights the whole ring (and the two front LEDs).
 #[tauri::command]
 fn set_ring(state: State<Shared>, color: String) -> Result<(), String> {
-    let hex = color.trim_start_matches('#');
-    let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0);
-    send(&state, Command::Ring(vec![Rgb(byte(0), byte(2), byte(4)); 24]))
+    let mut dock = state.lock().unwrap();
+    let level = dock.settings.ring_brightness;
+    let cmds = vec![Command::Ring(vec![hex_rgb(&color); 24]), Command::RingBrightness(level)];
+    dock.change(
+        |s| {
+            s.ring_color = color.clone();
+            s.ring_on = true;
+        },
+        cmds,
+    )
+}
+
+#[tauri::command]
+fn set_ring_brightness(state: State<Shared>, percent: u8) -> Result<(), String> {
+    let percent = percent.min(100);
+    let mut dock = state.lock().unwrap();
+    let cmds = if dock.settings.ring_on { vec![Command::RingBrightness(percent)] } else { vec![] };
+    dock.change(|s| s.ring_brightness = percent, cmds)
 }
 
 #[tauri::command]
 fn ring_off(state: State<Shared>) -> Result<(), String> {
-    send(&state, Command::RingReset)
+    state.lock().unwrap().change(|s| s.ring_on = false, vec![Command::RingOff])
+}
+
+/// Turns loading VSD Craft's plugins on or off, then restarts the plugin
+/// host so the list matches.
+#[tauri::command]
+fn set_use_vsd_craft_plugins(app: AppHandle, state: State<Shared>, host: State<Host>, on: bool) -> Result<(), String> {
+    {
+        let mut dock = state.lock().unwrap();
+        dock.settings.use_vsd_craft_plugins = on;
+        save_settings(&dock.settings_path, &dock.settings);
+    }
+    restart_host(&app, &host, &state, &app.state::<Previews>())
 }
 
 #[tauri::command]
@@ -187,12 +295,12 @@ fn find_node() -> Option<PathBuf> {
         .filter(|p| p.is_file())
 }
 
-fn start_host(app: &AppHandle) -> Result<(HostHandle, Receiver<HostEvent>), String> {
+fn start_host(app: &AppHandle, use_vsd_craft: bool) -> Result<(HostHandle, Receiver<HostEvent>), String> {
     let data = data_dir(app);
     let own = data.join("plugins");
     let _ = std::fs::create_dir_all(&own);
     let mut plugin_dirs = vec![(own, Source::Agora)];
-    if let Some(vsd) = manifest::vsd_craft_plugin_dir() {
+    if let Some(vsd) = manifest::vsd_craft_plugin_dir().filter(|_| use_vsd_craft) {
         // Read only: plugins installed for VSD Craft, used as they are.
         plugin_dirs.push((vsd, Source::VsdCraft));
     }
@@ -204,6 +312,26 @@ fn start_host(app: &AppHandle) -> Result<(HostHandle, Receiver<HostEvent>), Stri
     };
     let (tx, rx) = std::sync::mpsc::channel();
     Ok((HostHandle::start(config, tx)?, rx))
+}
+
+/// Starts the plugin host (stopping a running one first) and its event thread.
+fn restart_host(app: &AppHandle, host: &Host, shared: &Shared, previews: &Previews) -> Result<(), String> {
+    let old = host.lock().unwrap().take();
+    drop(old);
+    previews.lock().unwrap().clear();
+    let use_vsd = shared.lock().unwrap().settings.use_vsd_craft_plugins;
+    let (h, events) = start_host(app, use_vsd)?;
+    if shared.lock().unwrap().worker.is_some() {
+        h.device_connected(true);
+    }
+    *host.lock().unwrap() = Some(h);
+    let (handle, shared, previews) = (app.clone(), shared.clone(), previews.clone());
+    std::thread::Builder::new()
+        .name("agora-host-events".into())
+        .spawn(move || host_events(handle, shared, previews, events))
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("host-restarted", ());
+    Ok(())
 }
 
 fn png_data_uri(img: &image::DynamicImage) -> Option<String> {
@@ -370,6 +498,7 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
             Ok((model, (worker, events))) => {
                 {
                     let mut dock = shared.lock().unwrap();
+                    apply_settings(&worker, &dock.settings);
                     dock.worker = Some(worker);
                     dock.model = Some(model.clone());
                     report(&app, &mut dock, format!("{model} connected"));
@@ -438,7 +567,10 @@ fn main() {
             dock_status,
             set_brightness,
             set_ring,
+            set_ring_brightness,
             ring_off,
+            get_settings,
+            set_use_vsd_craft_plugins,
             list_actions,
             list_plugins,
             key_info,
@@ -479,15 +611,13 @@ fn main() {
                 .build(app)?;
 
             let handle = app.handle().clone();
-            match start_host(&handle) {
-                Ok((h, events)) => {
-                    *host.lock().unwrap() = Some(h);
-                    let (handle, shared, previews) = (handle.clone(), shared.clone(), previews.clone());
-                    std::thread::Builder::new()
-                        .name("agora-host-events".into())
-                        .spawn(move || host_events(handle, shared, previews, events))?;
-                }
-                Err(e) => eprintln!("plugin host didn't start: {e}"),
+            {
+                let mut dock = shared.lock().unwrap();
+                dock.settings_path = data_dir(&handle).join("settings.json");
+                dock.settings = load_settings(&dock.settings_path);
+            }
+            if let Err(e) = restart_host(&handle, &host, &shared, &previews) {
+                eprintln!("plugin host didn't start: {e}");
             }
 
             let (handle, shared, host) = (app.handle().clone(), shared.clone(), host.clone());

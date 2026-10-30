@@ -9,7 +9,10 @@
 //! - Key image: 64x64 JPEG, sent as BAT + raw 1024-byte pages + STP. Sent
 //!   upright (no rotation), confirmed 2026-10-30.
 //! - Image ids count from the bottom row; event ids count from the top row.
-//! - Light ring: SETLB with 24 RGB triples. Send colour before brightness.
+//! - Light ring: SETLB with 24 RGB triples, LBLIG for its brightness. A
+//!   brightness write re-renders the strip and wipes a SETLB sent just
+//!   before it lands, so colour always goes first and brightness is only
+//!   sent when it changes (bidoofgoo/streamdock-m18 PROTOCOL.md section 8).
 //! - Close: CLE 00 44 43, then HAN. DELED resets the ring.
 
 use crate::transport::Transport;
@@ -47,11 +50,15 @@ pub struct M18<T: Transport> {
     t: T,
     pub buttons: ButtonMap,
     brightness: u8,
+    /// Last SETLB frame (24 RGB triples), re-sent with the keepalive.
+    ring_frame: Option<Vec<u8>>,
+    /// Last LBLIG sent; `None` until the ring is first used.
+    ring_brightness: Option<u8>,
 }
 
 impl<T: Transport> M18<T> {
     pub fn new(t: T) -> Self {
-        Self { t, buttons: ButtonMap::default(), brightness: 80 }
+        Self { t, buttons: ButtonMap::default(), brightness: 80, ring_frame: None, ring_brightness: None }
     }
 
     pub fn layout(&self) -> Layout {
@@ -79,6 +86,8 @@ impl<T: Transport> M18<T> {
         self.cmd(b"CONNECT")?;
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.clear_all()?;
+        self.ring_frame = None;
+        self.ring_brightness = None;
         self.set_brightness(self.brightness)
     }
 
@@ -92,8 +101,13 @@ impl<T: Transport> M18<T> {
         self.brightness
     }
 
-    /// Re-sends the last brightness so the dock stays on our screen.
+    /// Re-sends the ring colours and the screen brightness so the dock
+    /// stays on our screen. Never re-sends the ring brightness: that would
+    /// wipe the colours.
     pub fn keepalive(&mut self) -> Result<()> {
+        if let Some(frame) = self.ring_frame.clone() {
+            self.send_ring_frame(&frame)?;
+        }
         self.set_brightness(self.brightness)
     }
 
@@ -116,18 +130,57 @@ impl<T: Transport> M18<T> {
         self.cmd(b"STP")
     }
 
-    /// Sets every ring LED. `colors` shorter than 24 leaves the rest dark.
-    pub fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> {
-        let mut body = Vec::with_capacity(5 + LAYOUT.ring_leds * 3);
+    fn send_ring_frame(&mut self, frame: &[u8]) -> Result<()> {
+        let mut body = Vec::with_capacity(5 + frame.len());
         body.extend_from_slice(b"SETLB");
-        for i in 0..LAYOUT.ring_leds {
-            let Rgb(r, g, b) = colors.get(i).copied().unwrap_or_default();
-            body.extend_from_slice(&[r, g, b]);
-        }
+        body.extend_from_slice(frame);
         self.cmd(&body)
     }
 
+    /// Sets every ring LED (0-21 the ring, 22-23 the front). `colors`
+    /// shorter than 24 leaves the rest dark. The first time, also turns the
+    /// ring's brightness up, after the colours so they aren't wiped.
+    pub fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> {
+        let mut frame = Vec::with_capacity(LAYOUT.ring_leds * 3);
+        for i in 0..LAYOUT.ring_leds {
+            let Rgb(r, g, b) = colors.get(i).copied().unwrap_or_default();
+            frame.extend_from_slice(&[r, g, b]);
+        }
+        self.send_ring_frame(&frame)?;
+        self.ring_frame = Some(frame);
+        if self.ring_brightness.is_none() {
+            self.send_ring_brightness(100)?;
+        }
+        Ok(())
+    }
+
+    /// Ring brightness, 0 to 100. Skipped when unchanged; the colours are
+    /// sent again first so the brightness render picks them up.
+    pub fn set_ring_brightness(&mut self, pct: u8) -> Result<()> {
+        let pct = pct.min(100);
+        if self.ring_brightness == Some(pct) {
+            return Ok(());
+        }
+        if let Some(frame) = self.ring_frame.clone() {
+            self.send_ring_frame(&frame)?;
+        }
+        self.send_ring_brightness(pct)
+    }
+
+    fn send_ring_brightness(&mut self, pct: u8) -> Result<()> {
+        self.cmd(&[b'L', b'B', b'L', b'I', b'G', pct])?;
+        self.ring_brightness = Some(pct);
+        Ok(())
+    }
+
+    /// Turns every LED off (and keeps it off through keepalives).
+    pub fn ring_off(&mut self) -> Result<()> {
+        self.set_ring(&[])
+    }
+
+    /// Hands the strip back to the dock's own lighting.
     pub fn ring_reset(&mut self) -> Result<()> {
+        self.ring_frame = None;
         self.cmd(b"DELED")
     }
 
@@ -236,6 +289,22 @@ mod tests {
         assert_eq!(w[0].len(), 5 + 5 + 72);
         assert_eq!(&w[0][5..10], b"SETLB");
         assert_eq!(&w[0][10..13], &[0, 80, 255]);
+        // First use turns the ring brightness up, after the colours.
+        assert_eq!(w[1], b"CRT\0\0LBLIG\x64");
+        assert_eq!(w.len(), 2);
+    }
+
+    #[test]
+    fn ring_colour_always_goes_before_its_brightness() {
+        let mut d = dock();
+        d.set_ring(&[Rgb(255, 0, 0); 24]).unwrap();
+        d.set_ring_brightness(40).unwrap();
+        d.set_ring_brightness(40).unwrap(); // unchanged: nothing sent
+        d.keepalive().unwrap();
+        let w = d.into_transport().written;
+        let names: Vec<&[u8]> = w.iter().map(|m| &m[5..10]).collect();
+        assert_eq!(names, [&b"SETLB"[..], b"LBLIG", b"SETLB", b"LBLIG", b"SETLB", b"LIG\0\0"]);
+        assert_eq!(w[3], b"CRT\0\0LBLIG\x28");
     }
 
     fn report(id: u8, state: u8) -> Vec<u8> {

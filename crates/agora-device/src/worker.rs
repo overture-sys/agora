@@ -18,6 +18,8 @@ pub trait Dock: Send {
     fn clear_all(&mut self) -> Result<()>;
     fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()>;
     fn set_ring(&mut self, colors: &[Rgb]) -> Result<()>;
+    fn set_ring_brightness(&mut self, pct: u8) -> Result<()>;
+    fn ring_off(&mut self) -> Result<()>;
     fn ring_reset(&mut self) -> Result<()>;
     fn close(&mut self) -> Result<()>;
     fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>>;
@@ -32,6 +34,8 @@ impl<T: Transport> Dock for M18<T> {
     fn clear_all(&mut self) -> Result<()> { M18::clear_all(self) }
     fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()> { M18::set_key_jpeg(self, key, jpeg) }
     fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> { M18::set_ring(self, colors) }
+    fn set_ring_brightness(&mut self, pct: u8) -> Result<()> { M18::set_ring_brightness(self, pct) }
+    fn ring_off(&mut self) -> Result<()> { M18::ring_off(self) }
     fn ring_reset(&mut self) -> Result<()> { M18::ring_reset(self) }
     fn close(&mut self) -> Result<()> { M18::close(self) }
     fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>> { M18::read_event(self, timeout_ms) }
@@ -42,6 +46,11 @@ pub enum Command {
     SetKeyJpeg(usize, Vec<u8>),
     Brightness(u8),
     Ring(Vec<Rgb>),
+    /// Ring brightness, 0 to 100.
+    RingBrightness(u8),
+    /// All ring LEDs off.
+    RingOff,
+    /// Hand the ring back to the dock's own lighting.
     RingReset,
     ClearAll,
     /// Hand the dock back to its stock screen and stop the thread.
@@ -117,6 +126,14 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
                 Command::Ring(c) => {
                     ring_used = true;
                     dock.set_ring(&c)
+                }
+                Command::RingBrightness(p) => {
+                    ring_used = true;
+                    dock.set_ring_brightness(p)
+                }
+                Command::RingOff => {
+                    ring_used = true;
+                    dock.ring_off()
                 }
                 Command::RingReset => dock.ring_reset(),
                 Command::ClearAll => dock.clear_all(),

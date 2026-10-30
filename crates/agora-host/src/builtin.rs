@@ -27,6 +27,10 @@ pub const NEXT_PAGE: &str = "next-page";
 pub const PREVIOUS_PAGE: &str = "previous-page";
 pub const GO_TO_PAGE: &str = "go-to-page";
 pub const SWITCH_PROFILE: &str = "switch-profile";
+pub const MULTI: &str = "multi";
+pub const TOGGLE: &str = "toggle";
+/// A pause between multi-action steps; only inside multi-actions.
+pub const DELAY: &str = "delay";
 
 const STROKE: &str = r##"fill="none" stroke="#e9dcc4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round""##;
 
@@ -148,18 +152,51 @@ pub static DEFS: &[Def] = &[
         settings: || json!({ "mode": "toggle", "color": "#d9794a" }),
         navigation: false,
     },
+    Def {
+        id: MULTI,
+        name: "Multi-action",
+        group: "Multi-action",
+        tooltip: "Runs several actions in order, with pauses if you like",
+        icon: r##"<rect x="14" y="14" width="44" height="12" rx="3" S/><rect x="14" y="30" width="44" height="12" rx="3" S/><rect x="14" y="46" width="44" height="12" rx="3" S/>"##,
+        settings: || json!({ "steps": [] }),
+        navigation: false,
+    },
+    Def {
+        id: TOGGLE,
+        name: "Toggle",
+        group: "Multi-action",
+        tooltip: "Runs one set of actions, then the other set on the next press",
+        icon: r##"<rect x="10" y="24" width="52" height="24" rx="12" S/><circle cx="48" cy="36" r="7" S/>"##,
+        settings: || json!({ "steps": [], "steps_b": [] }),
+        navigation: false,
+    },
 ];
+
+/// Steps a multi-action may hold: Agora's own actions except folders and
+/// other multi-actions, plus pauses.
+pub fn step_allowed(id: &str) -> bool {
+    id == DELAY || (def(id).is_some() && !matches!(id, FOLDER | MULTI | TOGGLE))
+}
 
 pub fn def(id: &str) -> Option<&'static Def> {
     DEFS.iter().find(|d| d.id == id)
 }
 
-/// The action's icon as a data URI, on a dark tile.
+/// The action's icon for a key, as a data URI on a dark tile. It is drawn
+/// a little small and high, so a title fits underneath.
 pub fn icon(id: &str) -> Option<String> {
+    draw(id, "translate(13.5 5) scale(0.625)")
+}
+
+/// The action's icon full size, for the action list.
+pub fn list_icon(id: &str) -> Option<String> {
+    draw(id, "")
+}
+
+fn draw(id: &str, transform: &str) -> Option<String> {
     let d = def(id)?;
     let svg = format!(
-        // Drawn a little small and high, so a title fits underneath.
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72"><rect width="72" height="72" fill="#2a2420"/><g transform="translate(13.5 5) scale(0.625)">{}</g></svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72"><rect width="72" height="72" fill="#2a2420"/><g transform="{transform}">{}</g></svg>"##,
         d.icon.replace(" S/>", &format!(" {STROKE}/>"))
     );
     Some(format!(
@@ -168,12 +205,28 @@ pub fn icon(id: &str) -> Option<String> {
     ))
 }
 
+/// The icon for a key in a given state: a Toggle shows which set runs next.
+pub fn icon_for(id: &str, state: usize) -> Option<String> {
+    let uri = icon(id)?;
+    if id != TOGGLE || state == 0 {
+        return Some(uri);
+    }
+    let b64 = uri.strip_prefix("data:image/svg+xml;base64,")?;
+    let svg =
+        String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b64).ok()?).ok()?;
+    let svg = svg.replace(r#"cx="48""#, r#"cx="24""#);
+    Some(format!(
+        "data:image/svg+xml;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(svg)
+    ))
+}
+
 /// The group icon for the action list.
 pub fn group_icon(group: &str) -> Option<String> {
-    icon(if group == "Navigation" {
-        FOLDER
-    } else {
-        "open"
+    list_icon(match group {
+        "Navigation" => FOLDER,
+        "Multi-action" => MULTI,
+        _ => "open",
     })
 }
 

@@ -12,10 +12,12 @@
   type Look = { title?: string | null; show_title?: boolean | null; align?: string | null; color?: string | null; font_size?: number | null; icon?: string | null };
   type KeyInfo = { key: number; plugin: string; plugin_name: string; action: string; name: string; settings_url: string | null; builtin: boolean; settings: Record<string, any>; look: Look };
   type NameId = { id: string; name: string };
-  type LayoutView = { profiles: NameId[]; profile: string; pages: NameId[]; page: string; top_page: string; path: NameId[] };
+  type Step = { action: string; settings: Record<string, any> };
+  type Save = (patch: Record<string, unknown>) => void;
+  type LayoutView = { profiles: NameId[]; profile: string; pages: NameId[]; page: string; top_page: string; path: NameId[]; apps: string[] };
   type Preview = { key: number; image: string | null };
   type Line = { plugin: string; message: string };
-  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean };
+  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[] };
   type LogLine = { time: string; text: string; err: boolean };
   type Page = "home" | "keys" | "plugins" | "dock";
 
@@ -58,7 +60,7 @@
   let picking = $state(false);
   let search = $state("");
   let log = $state<LogLine[]>([]);
-  let settings = $state<Settings>({ brightness: 80, ring_color: "#d9794a", ring_on: false, ring_brightness: 100, use_vsd_craft_plugins: false });
+  let settings = $state<Settings>({ brightness: 80, ring_color: "#d9794a", ring_on: false, ring_brightness: 100, use_vsd_craft_plugins: false, start_with_windows: false, ring_colors: [] });
   let error = $state("");
   let notice = $state("");
   // The plugin (or "page:id", "profile:id") whose Delete was clicked once and now asks to be sure.
@@ -66,6 +68,17 @@
   let layout = $state<LayoutView | null>(null);
   // A page or profile name being edited in place.
   let renaming = $state<{ kind: "page" | "profile"; id: string; name: string } | null>(null);
+  // The "apps that bring this profile up" panel.
+  let appsOpen = $state(false);
+  let recentApps = $state<string[]>([]);
+  let typedApp = $state("");
+  // Importing VSD Craft profiles.
+  type VsdProfile = { dir: string; name: string; pages: number; keys: number };
+  type ImportReport = { profiles: string[]; keys: number; skipped: string[] };
+  let importOpen = $state(false);
+  let vsdProfiles = $state<VsdProfile[]>([]);
+  let importPick = $state(new Set<string>());
+  let importReport = $state<ImportReport | null>(null);
 
   // Plugin groups the person has opened in the action list.
   let openGroups = $state(new Set<string>());
@@ -135,12 +148,50 @@
     if (before !== undefined && layout && layout.page !== before) loadKey(null);
   }
 
-  async function layoutOp(op: string, id?: string, name?: string) {
+  async function layoutOp(op: string, id?: string, name?: string, apps?: string[]) {
     renaming = null;
     confirming = null;
-    await call("layout_op", { op, id, name });
+    await call("layout_op", { op, id, name, apps });
     await loadLayout();
     loadOverview();
+  }
+
+  async function toggleImport() {
+    importOpen = !importOpen;
+    importReport = null;
+    if (importOpen) {
+      appsOpen = false;
+      vsdProfiles = (await call<VsdProfile[]>("list_vsd_profiles")) ?? [];
+      importPick = new Set();
+    }
+  }
+
+  async function runImport() {
+    const report = await call<ImportReport>("import_vsd_profiles", { dirs: [...importPick] });
+    if (!report) return;
+    importReport = report;
+    importPick = new Set();
+    await loadLayout();
+    refreshPlugins();
+  }
+
+  async function toggleApps() {
+    appsOpen = !appsOpen;
+    if (appsOpen) importOpen = false;
+    if (appsOpen) recentApps = (await call<string[]>("recent_apps")) ?? [];
+  }
+
+  async function setApps(apps: string[]) {
+    if (!layout) return;
+    await layoutOp("set-profile-apps", layout.profile, undefined, apps);
+  }
+
+  function addApp(app: string) {
+    let a = app.trim().toLowerCase();
+    if (!a || !layout) return;
+    if (!a.includes(".")) a += ".exe";
+    typedApp = "";
+    if (!layout.apps.includes(a)) setApps([...layout.apps, a]);
   }
 
   function startRename(kind: "page" | "profile", item: NameId) {
@@ -192,14 +243,65 @@
     await call("set_key_look", { key: selected, look });
   }
 
-  async function pickProgram() {
+  async function pickProgram(save: Save) {
     const path = await openDialog({ multiple: false, directory: false, title: "Choose an app or file" }).catch(() => null);
-    if (typeof path === "string") saveSettings({ path });
+    if (typeof path === "string") save({ path });
   }
 
-  async function pickFolderPath() {
+  async function pickFolderPath(save: Save) {
     const path = await openDialog({ multiple: false, directory: true, title: "Choose a folder" }).catch(() => null);
-    if (typeof path === "string") saveSettings({ path });
+    if (typeof path === "string") save({ path });
+  }
+
+  // ---- multi-action steps ----
+
+  // Settings a new step starts with (the same as the host's defaults).
+  const stepDefaults: Record<string, Record<string, unknown>> = {
+    open: { path: "", args: "" },
+    website: { url: "https://" },
+    hotkey: { keys: "" },
+    text: { text: "", enter: false },
+    media: { key: "play-pause" },
+    brightness: { mode: "up", value: 50 },
+    ring: { mode: "toggle", color: "#d9794a" },
+    "go-to-page": { page: 1 },
+    "switch-profile": { profile: "" },
+    delay: { ms: 500 },
+  };
+  const stepChoices = $derived([
+    ...actions.filter((a) => a.plugin === "com.agora.builtin" && !["folder", "multi", "toggle"].includes(a.action)).map((a) => ({ id: a.action, name: a.name })),
+    { id: "delay", name: "Pause" },
+  ]);
+
+  function stepName(id: string) {
+    return id === "delay" ? "Pause" : (actions.find((a) => a.plugin === "com.agora.builtin" && a.action === id)?.name ?? id);
+  }
+
+  function stepList(field: string): Step[] {
+    return [...((info?.settings[field] ?? []) as Step[])];
+  }
+
+  function addStep(field: string, action: string) {
+    if (!action) return;
+    saveSettings({ [field]: [...stepList(field), { action, settings: { ...(stepDefaults[action] ?? {}) } }] });
+  }
+
+  function updateStep(field: string, i: number, patch: Record<string, unknown>) {
+    const list = stepList(field);
+    list[i] = { ...list[i], settings: { ...list[i].settings, ...patch } };
+    saveSettings({ [field]: list });
+  }
+
+  function moveStep(field: string, i: number, by: number) {
+    const list = stepList(field);
+    [list[i], list[i + by]] = [list[i + by], list[i]];
+    saveSettings({ [field]: list });
+  }
+
+  function removeStep(field: string, i: number) {
+    const list = stepList(field);
+    list.splice(i, 1);
+    saveSettings({ [field]: list });
   }
 
   /// Reads an image file, shrinks it to the key's size and saves it as the key's icon.
@@ -227,13 +329,13 @@
   }
 
   /// Turns a key press in the hotkey box into "Ctrl+Shift+M".
-  function recordHotkey(e: KeyboardEvent) {
+  function recordHotkey(e: KeyboardEvent, save: Save) {
     if (e.key === "Tab") return;
     e.preventDefault();
     const named: Record<string, string> = { " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right", Escape: "Esc", Delete: "Del", PageUp: "PgUp", PageDown: "PgDn", PrintScreen: "PrtSc" };
     if (["Control", "Shift", "Alt", "Meta", "OS"].includes(e.key)) return;
     if (e.key === "Backspace" && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
-      saveSettings({ keys: "" });
+      save({ keys: "" });
       return;
     }
     const parts = [];
@@ -246,7 +348,7 @@
     else if (/^Digit\d$/.test(e.code)) k = e.code.slice(5);
     else if (k.length === 1) k = k.toUpperCase();
     parts.push(k);
-    saveSettings({ keys: parts.join("+") });
+    save({ keys: parts.join("+") });
   }
 
   async function loadOverview() {
@@ -352,9 +454,54 @@
 
   async function setRing(color: string) {
     settings.ring_color = color;
+    settings.ring_colors = [];
     settings.ring_on = true;
     await call("set_ring", { color });
   }
+
+  // Painting lights one by one.
+  let paint = $state(false);
+  let brush = $state("#d9794a");
+  let painting = false;
+
+  function lightColor(i: number) {
+    return settings.ring_colors.length === 24 ? settings.ring_colors[i] : settings.ring_color;
+  }
+
+  async function setLights(colors: string[]) {
+    settings.ring_colors = colors;
+    settings.ring_on = true;
+    await call("set_ring_lights", { colors });
+  }
+
+  function paintLight(i: number) {
+    const colors = Array.from({ length: 24 }, (_, k) => lightColor(k));
+    if (colors[i] === brush) return;
+    colors[i] = brush;
+    setLights(colors);
+  }
+
+  function mix(a: string, b: string, t: number) {
+    const p = (h: string, i: number) => parseInt(h.slice(1 + i * 2, 3 + i * 2), 16);
+    return "#" + [0, 1, 2].map((i) => Math.round(p(a, i) + (p(b, i) - p(a, i)) * t).toString(16).padStart(2, "0")).join("");
+  }
+
+  // Ring presets: 22 ring colours, then the two front lights.
+  const ringPresets: { name: string; colors: () => string[] }[] = [
+    {
+      name: "Rainbow",
+      colors: () => {
+        const ring = Array.from({ length: 22 }, (_, i) => {
+          const h = (i / 22) * 360, f = (n: number) => { const k = (n + h / 60) % 6; return Math.round(255 * (1 - Math.max(0, Math.min(k, 4 - k, 1)))); };
+          return "#" + [f(5), f(3), f(1)].map((v) => v.toString(16).padStart(2, "0")).join("");
+        });
+        return [...ring, ring[0], ring[11]];
+      },
+    },
+    { name: "Meander", colors: () => Array.from({ length: 24 }, (_, i) => (i % 2 ? "#e8bc62" : "#d9794a")) },
+    { name: "Dawn", colors: () => { const r = Array.from({ length: 22 }, (_, i) => mix("#d9794a", "#7a2c6e", Math.abs(i - 11) / 11)); return [...r, "#d9794a", "#d9794a"]; } },
+    { name: "Aegean", colors: () => { const r = Array.from({ length: 22 }, (_, i) => mix("#2c5a88", "#f3ecdf", Math.abs(i - 11) / 11)); return [...r, "#2c5a88", "#2c5a88"]; } },
+  ];
 
   async function toggleRing() {
     if (settings.ring_on) {
@@ -570,6 +717,10 @@
           </select>
           <button class="small" onclick={() => startRename("profile", layout!.profiles.find((p) => p.id === layout!.profile)!)} title="Rename this profile">Rename</button>
           <button class="small" onclick={() => layoutOp("add-profile", undefined, `Profile ${layout!.profiles.length + 1}`)}>New</button>
+          <button class="small" class:on={appsOpen} onclick={toggleApps} aria-expanded={appsOpen}
+            title="Apps that bring this profile up">Apps{layout.apps.length ? ` (${layout.apps.length})` : ""}</button>
+          <button class="small" class:on={importOpen} onclick={toggleImport} aria-expanded={importOpen}
+            title="Bring in profiles from VSD Craft">Import</button>
           {#if layout.profiles.length > 1}
             <button class="small danger" class:sure={confirming === `profile:${layout.profile}`} onclick={() => removeWithConfirm("profile", layout!.profile)}
               >{confirming === `profile:${layout.profile}` ? "Sure? Delete" : "Delete"}</button
@@ -577,6 +728,53 @@
           {/if}
         {/if}
       </div>
+      {#if importOpen}
+        <div class="apps-panel">
+          {#if importReport}
+            <p><b>Imported {importReport.profiles.join(", ")}</b> with {importReport.keys} keys. Pick them from the profile list.</p>
+            {#if importReport.skipped.length}
+              <p class="muted small">Left out, because Agora can't run them yet: {importReport.skipped.join(", ")}.</p>
+            {/if}
+            <button class="small" onclick={() => (importOpen = false)}>Done</button>
+          {:else}
+            <p class="muted small">Your M18 profiles from VSD Craft. Each one you pick becomes a new Agora profile; VSD Craft's files aren't changed.</p>
+            {#if vsdProfiles.length === 0}<p class="muted small">No VSD Craft profiles for the M18 found.</p>{/if}
+            <div class="import-list">
+              {#each vsdProfiles as vp}
+                <label class="check">
+                  <input type="checkbox" checked={importPick.has(vp.dir)}
+                    onchange={(e) => { const n = new Set(importPick); e.currentTarget.checked ? n.add(vp.dir) : n.delete(vp.dir); importPick = n; }} />
+                  <span>{vp.name || "(no name)"} <span class="muted small">{vp.pages} {vp.pages === 1 ? "page" : "pages"}</span></span>
+                </label>
+              {/each}
+            </div>
+            <div class="row">
+              <button class="small primary" disabled={importPick.size === 0} onclick={runImport}>Import {importPick.size || ""}</button>
+              <button class="small" onclick={() => (importOpen = false)}>Cancel</button>
+            </div>
+          {/if}
+        </div>
+      {/if}
+      {#if appsOpen}
+        <div class="apps-panel">
+          <p class="muted small">This profile comes up by itself while one of these apps is in front, and the one you chose comes back after.</p>
+          <div class="chips">
+            {#each layout.apps as a}
+              <span class="chip">{a}<button onclick={() => setApps(layout!.apps.filter((x) => x !== a))} aria-label="Remove {a}">×</button></span>
+            {:else}
+              <span class="muted small">No apps yet.</span>
+            {/each}
+          </div>
+          <div class="row">
+            <select value="" onchange={(e) => { addApp(e.currentTarget.value); e.currentTarget.value = ""; }} aria-label="Recent apps">
+              <option value="" disabled>Apps you used lately…</option>
+              {#each recentApps.filter((a) => !layout!.apps.includes(a)) as a}<option value={a}>{a}</option>{/each}
+            </select>
+            <input class="rename" placeholder="or type one, e.g. obs64.exe" bind:value={typedApp} onkeydown={(e) => e.key === "Enter" && addApp(typedApp)} />
+            <button class="small" onclick={() => addApp(typedApp)} disabled={!typedApp.trim()}>Add</button>
+          </div>
+        </div>
+      {/if}
       <div class="tabs" role="tablist" aria-label="Pages">
         {#each layout.pages as p}
           {@const active = p.id === layout.top_page}
@@ -615,71 +813,102 @@
   {/if}
 {/snippet}
 
-{#snippet builtinSettings(ki: KeyInfo)}
-  {@const st = ki.settings}
+{#snippet actionForm(action: string, st: Record<string, any>, save: Save)}
   <div class="form">
-    {#if ki.action === "folder"}
-      <label>Folder name <input value={st.name ?? ""} onchange={(e) => saveSettings({ name: e.currentTarget.value })} /></label>
+    {#if action === "folder"}
+      <label>Folder name <input value={st.name ?? ""} onchange={(e) => save({ name: e.currentTarget.value })} /></label>
       <button class="primary" onclick={() => layoutOp("go-to-page", st.page)}>Open folder</button>
       <p class="muted small">Its keys get their own page, with a Back key on key 1. Double-click the folder key to open it too.</p>
-    {:else if ki.action === "go-to-page"}
+    {:else if action === "go-to-page"}
       <label>Page
-        <select value={st.page ?? 1} onchange={(e) => saveSettings({ page: Number(e.currentTarget.value) })}>
+        <select value={st.page ?? 1} onchange={(e) => save({ page: Number(e.currentTarget.value) })}>
           {#each layout?.pages ?? [] as p, i}<option value={i + 1}>{i + 1}. {p.name}</option>{/each}
         </select>
       </label>
-    {:else if ki.action === "switch-profile"}
+    {:else if action === "switch-profile"}
       <label>Profile
-        <select value={st.profile ?? ""} onchange={(e) => saveSettings({ profile: e.currentTarget.value })}>
+        <select value={st.profile ?? ""} onchange={(e) => save({ profile: e.currentTarget.value })}>
           <option value="" disabled>Choose a profile</option>
           {#each layout?.profiles ?? [] as p}<option value={p.id}>{p.name}</option>{/each}
         </select>
       </label>
-    {:else if ki.action === "open"}
+    {:else if action === "open"}
       <label>App, file or folder
-        <span class="row grow"><input value={st.path ?? ""} placeholder="C:\Program Files\..." onchange={(e) => saveSettings({ path: e.currentTarget.value })} />
-          <button onclick={pickProgram}>File…</button><button onclick={pickFolderPath}>Folder…</button></span>
+        <span class="row grow"><input value={st.path ?? ""} placeholder="C:\Program Files\..." onchange={(e) => save({ path: e.currentTarget.value })} />
+          <button onclick={() => pickProgram(save)}>File…</button><button onclick={() => pickFolderPath(save)}>Folder…</button></span>
       </label>
-      <label>Arguments <span class="muted small">(programs only)</span><input value={st.args ?? ""} onchange={(e) => saveSettings({ args: e.currentTarget.value })} /></label>
-    {:else if ki.action === "website"}
-      <label>Web address <input value={st.url ?? ""} placeholder="https://" onchange={(e) => saveSettings({ url: e.currentTarget.value })} /></label>
-    {:else if ki.action === "hotkey"}
+      <label>Arguments <span class="muted small">(programs only)</span><input value={st.args ?? ""} onchange={(e) => save({ args: e.currentTarget.value })} /></label>
+    {:else if action === "website"}
+      <label>Web address <input value={st.url ?? ""} placeholder="https://" onchange={(e) => save({ url: e.currentTarget.value })} /></label>
+    {:else if action === "hotkey"}
       <label>Keys
-        <input class="hotkey" value={st.keys ?? ""} placeholder="Click here, then press the keys" readonly onkeydown={recordHotkey} />
+        <input class="hotkey" value={st.keys ?? ""} placeholder="Click here, then press the keys" readonly onkeydown={(e) => recordHotkey(e, save)} />
       </label>
       <p class="muted small">Press the combination, such as Ctrl+Shift+M. Backspace clears it.</p>
-    {:else if ki.action === "text"}
-      <label>Text <textarea rows="4" value={st.text ?? ""} onchange={(e) => saveSettings({ text: e.currentTarget.value })}></textarea></label>
-      <label class="check"><input type="checkbox" checked={!!st.enter} onchange={(e) => saveSettings({ enter: e.currentTarget.checked })} /> Press Enter afterwards</label>
-    {:else if ki.action === "media"}
+    {:else if action === "text"}
+      <label>Text <textarea rows="4" value={st.text ?? ""} onchange={(e) => save({ text: e.currentTarget.value })}></textarea></label>
+      <label class="check"><input type="checkbox" checked={!!st.enter} onchange={(e) => save({ enter: e.currentTarget.checked })} /> Press Enter afterwards</label>
+    {:else if action === "media"}
       <label>Key
-        <select value={st.key ?? "play-pause"} onchange={(e) => saveSettings({ key: e.currentTarget.value })}>
+        <select value={st.key ?? "play-pause"} onchange={(e) => save({ key: e.currentTarget.value })}>
           {#each mediaKeys as m}<option value={m.id}>{m.name}</option>{/each}
         </select>
       </label>
-    {:else if ki.action === "brightness"}
+    {:else if action === "brightness"}
       <label>Each press
-        <select value={st.mode ?? "up"} onchange={(e) => saveSettings({ mode: e.currentTarget.value })}>
+        <select value={st.mode ?? "up"} onchange={(e) => save({ mode: e.currentTarget.value })}>
           <option value="up">Brighter (+10%)</option><option value="down">Dimmer (-10%)</option><option value="set">Set to a level</option>
         </select>
       </label>
       {#if st.mode === "set"}
         <label class="slider"><span>Level <b>{st.value ?? 50}%</b></span>
-          <input type="range" min="0" max="100" value={st.value ?? 50} style="--fill: {st.value ?? 50}%" onchange={(e) => saveSettings({ value: Number(e.currentTarget.value) })} />
+          <input type="range" min="0" max="100" value={st.value ?? 50} style="--fill: {st.value ?? 50}%" onchange={(e) => save({ value: Number(e.currentTarget.value) })} />
         </label>
       {/if}
-    {:else if ki.action === "ring"}
+    {:else if action === "ring"}
       <label>Each press
-        <select value={st.mode ?? "toggle"} onchange={(e) => saveSettings({ mode: e.currentTarget.value })}>
+        <select value={st.mode ?? "toggle"} onchange={(e) => save({ mode: e.currentTarget.value })}>
           <option value="toggle">Turn on or off</option><option value="on">Turn on</option><option value="off">Turn off</option><option value="color">Set a colour</option>
         </select>
       </label>
       {#if st.mode === "color"}
-        <label class="check">Colour <input type="color" value={st.color ?? "#d9794a"} onchange={(e) => saveSettings({ color: e.currentTarget.value })} /></label>
+        <label class="check">Colour <input type="color" value={st.color ?? "#d9794a"} onchange={(e) => save({ color: e.currentTarget.value })} /></label>
       {/if}
+    {:else if action === "delay"}
+      <label>Pause for (milliseconds) <input type="number" min="0" max="60000" step="100" value={st.ms ?? 500} onchange={(e) => save({ ms: Number(e.currentTarget.value) })} /></label>
+    {:else if action === "multi"}
+      {@render stepsEditor("steps", "Steps, run in order on each press")}
+    {:else if action === "toggle"}
+      {@render stepsEditor("steps", "First press")}
+      {@render stepsEditor("steps_b", "Second press")}
     {:else}
       <p class="muted">This action has no settings.</p>
     {/if}
+  </div>
+{/snippet}
+
+{#snippet stepsEditor(field: string, label: string)}
+  {@const list = (info?.settings[field] ?? []) as Step[]}
+  <div class="steps">
+    <h3>{label}</h3>
+    {#if list.length === 0}<p class="muted small">No steps yet.</p>{/if}
+    {#each list as step, i}
+      <div class="step">
+        <div class="step-head">
+          <b>{i + 1}. {stepName(step.action)}</b>
+          <span class="row">
+            <button class="small" disabled={i === 0} onclick={() => moveStep(field, i, -1)} aria-label="Move up">↑</button>
+            <button class="small" disabled={i === list.length - 1} onclick={() => moveStep(field, i, 1)} aria-label="Move down">↓</button>
+            <button class="small danger" onclick={() => removeStep(field, i)} aria-label="Remove step">×</button>
+          </span>
+        </div>
+        {@render actionForm(step.action, step.settings ?? {}, (patch) => updateStep(field, i, patch))}
+      </div>
+    {/each}
+    <select class="add-step" value="" onchange={(e) => { addStep(field, e.currentTarget.value); e.currentTarget.value = ""; }} aria-label="Add a step">
+      <option value="" disabled>+ Add a step</option>
+      {#each stepChoices as c}<option value={c.id}>{c.name}</option>{/each}
+    </select>
   </div>
 {/snippet}
 
@@ -713,6 +942,8 @@
     {#each log.slice(0, limit) as line}<div class="ostrakon" class:err={line.err}><time>{line.time}</time>{line.text}</div>{/each}
   </div>
 {/snippet}
+
+<svelte:window onpointerup={() => (painting = false)} />
 
 <div class="shell">
   <nav class="rail" aria-label="Pages">
@@ -831,7 +1062,7 @@
               </div>
             </div>
             {#if info.builtin}
-              {@render builtinSettings(info)}
+              {@render actionForm(info.action, info.settings, saveSettings)}
             {/if}
             {@render lookEditor(info)}
             {#if info.settings_url}
@@ -918,30 +1149,47 @@
               <span>{settings.ring_on ? "On" : "Off"}</span>
             </label>
           </div>
-          <svg class="ring-preview" viewBox="0 0 220 150" role="img" aria-label="Light ring preview">
+          <svg class="ring-preview" viewBox="0 0 220 152" role="img" aria-label="Light ring preview">
             <rect x="34" y="26" width="152" height="88" rx="14" fill="var(--key)" />
-            {#each ringLeds as l}
-              <circle cx={l.x} cy={l.y} r="5" fill={settings.ring_on ? settings.ring_color : "var(--line)"}
-                opacity={settings.ring_on ? 0.35 + (0.65 * settings.ring_brightness) / 100 : 1} />
+            {#each ringLeds as l, i}
+              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+              <circle cx={l.x} cy={l.y} r={paint ? 7 : 5} fill={settings.ring_on ? lightColor(i) : "var(--line)"}
+                class:paintable={paint}
+                opacity={settings.ring_on ? 0.35 + (0.65 * settings.ring_brightness) / 100 : 1}
+                onpointerdown={() => { if (paint) { painting = true; paintLight(i); } }}
+                onpointerenter={() => painting && paintLight(i)} />
             {/each}
-            {#each [96, 124] as x}
-              <rect x={x - 6} y="132" width="12" height="4" rx="2" fill={settings.ring_on ? settings.ring_color : "var(--line)"} />
+            {#each [96, 124] as x, f}
+              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+              <rect x={x - 7} y="140" width="14" height={paint ? 8 : 5} rx="2" fill={settings.ring_on ? lightColor(22 + f) : "var(--line)"}
+                class:paintable={paint}
+                onpointerdown={() => { if (paint) { painting = true; paintLight(22 + f); } }}
+                onpointerenter={() => painting && paintLight(22 + f)} />
             {/each}
           </svg>
+          <div class="seg" role="group" aria-label="How colours apply">
+            <button class:active={!paint} onclick={() => (paint = false)}>Whole ring</button>
+            <button class:active={paint} onclick={() => { paint = true; brush = settings.ring_color; }}>Paint lights</button>
+          </div>
+          {#if paint}<p class="muted small">Pick a colour, then click or drag over the lights.</p>{/if}
           <div class="swatches" role="group" aria-label="Ring colour">
             {#each ringSwatches as sw}
               <button
                 class="swatch-btn"
-                class:chosen={settings.ring_on && settings.ring_color.toLowerCase() === sw.color}
+                class:chosen={paint ? brush === sw.color : settings.ring_on && !settings.ring_colors.length && settings.ring_color.toLowerCase() === sw.color}
                 style="--sw: {sw.color}"
                 title={sw.name}
                 aria-label={sw.name}
-                onclick={() => setRing(sw.color)}
+                onclick={() => (paint ? (brush = sw.color) : setRing(sw.color))}
               ></button>
             {/each}
             <label class="swatch-btn custom" title="Pick any colour">
-              <input type="color" value={settings.ring_color} onchange={(e) => setRing(e.currentTarget.value)} aria-label="Pick any colour" />
+              <input type="color" value={paint ? brush : settings.ring_color} onchange={(e) => (paint ? (brush = e.currentTarget.value) : setRing(e.currentTarget.value))} aria-label="Pick any colour" />
             </label>
+          </div>
+          <div class="row wrap presets">
+            <span class="muted small">Presets</span>
+            {#each ringPresets as pr}<button class="small" onclick={() => setLights(pr.colors())}>{pr.name}</button>{/each}
           </div>
           <label class="slider">
             <span>Ring brightness <b>{settings.ring_brightness}%</b></span>
@@ -956,6 +1204,22 @@
           </label>
           {#if notice}<p class="muted small">{notice}</p>{/if}
           {#if error}<p class="error">{error}</p>{/if}
+        </section>
+
+        <section class="screen-card">
+          <h2>Agora</h2>
+          <label class="switch-row">
+            <input type="checkbox" role="switch" checked={settings.start_with_windows}
+              onchange={async (e) => {
+                const on = e.currentTarget.checked;
+                await call("set_start_with_windows", { on });
+                settings = (await call<Settings>("get_settings")) ?? settings;
+              }} />
+            <span>
+              Start with Windows
+              <span class="muted small">Agora starts in the tray when you sign in, so the dock works straight away.</span>
+            </span>
+          </label>
         </section>
       </div>
     {/if}

@@ -70,6 +70,9 @@ pub fn parse_hotkey(text: &str) -> Result<Vec<K>, String> {
             c if c.len() == 1 && c.as_bytes()[0].is_ascii_alphanumeric() => {
                 K::Vk(c.to_ascii_uppercase().as_bytes()[0] as u16)
             }
+            v if v.len() > 2 && v.starts_with("vk") && v[2..].parse::<u16>().is_ok() => {
+                K::Vk(v[2..].parse().unwrap())
+            }
             other => return Err(format!("Agora doesn't know the key \"{other}\"")),
         };
         out.push(k);
@@ -275,6 +278,10 @@ mod tests {
             vec![K::Ctrl, K::Alt, K::Vk(0x2E)]
         );
         assert!(parse_hotkey("ctrl+banana").is_err());
+        assert_eq!(
+            parse_hotkey("Ctrl+VK173").unwrap(),
+            vec![K::Ctrl, K::Vk(173)]
+        );
         assert!(parse_hotkey("").is_err());
     }
 

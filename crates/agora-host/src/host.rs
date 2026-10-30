@@ -14,6 +14,7 @@ use crate::builtin::{self, PLUGIN as BUILTIN};
 use crate::face::{self, Face, Overlay};
 use crate::launch::{self, Running};
 use crate::manifest::{self, Kind, Plugin};
+use crate::vsd_import;
 use crate::{server, Config};
 
 /// The dock as plugins see it.
@@ -147,6 +148,17 @@ pub struct LayoutView {
     pub top_page: String,
     /// Folders open from `top_page` down to `page`; empty on a profile page.
     pub path: Vec<NameId>,
+    /// The apps that bring the active profile up.
+    pub apps: Vec<String>,
+}
+
+/// What a VSD Craft import brought in.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportReport {
+    pub profiles: Vec<String>,
+    pub keys: usize,
+    /// Actions Agora can't run (yet), by name.
+    pub skipped: Vec<String>,
 }
 
 /// Changes to profiles and pages.
@@ -159,6 +171,8 @@ pub enum LayoutOp {
     AddProfile(String),
     RemoveProfile(String),
     RenameProfile(String, String),
+    /// The apps (program file names, e.g. "obs64.exe") that bring a profile up.
+    SetProfileApps(String, Vec<String>),
     SwitchProfile(String),
 }
 
@@ -241,6 +255,9 @@ struct Profile {
     /// The page showing when this profile is active.
     #[serde(default)]
     current: String,
+    /// Programs that bring this profile up while they are in front.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    apps: Vec<String>,
 }
 
 impl Profile {
@@ -251,6 +268,7 @@ impl Profile {
             name: name.into(),
             current: page.id.clone(),
             pages: vec![page],
+            apps: Vec::new(),
         }
     }
 
@@ -416,6 +434,48 @@ impl Layout {
             page: p.current.clone(),
             top_page: top,
             path,
+            apps: p.apps.clone(),
+        }
+    }
+}
+
+/// Puts imported keys on a page, making folder pages as it goes.
+fn fill_page(
+    pages: &mut Vec<Page>,
+    page_id: &str,
+    read: &vsd_import::ReadPage,
+    ids: &HashMap<String, String>,
+    count: &mut usize,
+) {
+    for (key, rk) in &read.keys {
+        let mut settings = rk.settings.clone();
+        if let Some(folder) = &rk.folder {
+            let name = settings
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Folder")
+                .to_string();
+            let fp = Page::new(&name, Some(page_id.to_string()));
+            let fid = fp.id.clone();
+            pages.push(fp);
+            fill_page(pages, &fid, folder, ids, count);
+            settings["page"] = json!(fid);
+        }
+        if let Some(target) = &rk.switch_to {
+            settings["profile"] = json!(ids.get(target).cloned().unwrap_or_default());
+        }
+        let mut inst = Instance::new(&rk.plugin, &rk.action, settings);
+        inst.look = Look {
+            title: rk.title.clone(),
+            show_title: rk.show_title,
+            align: rk.align.clone(),
+            color: rk.color.clone(),
+            font_size: rk.font_size,
+            icon: rk.icon.clone(),
+        };
+        if let Some(p) = pages.iter_mut().find(|p| p.id == page_id) {
+            p.keys.insert(*key, inst);
+            *count += 1;
         }
     }
 }
@@ -441,9 +501,13 @@ pub(crate) enum Msg {
     SetSettings(usize, Value),
     SetLook(usize, Look),
     View(oneshot::Sender<LayoutView>),
+    Foreground(String),
+    ImportVsd(Vec<PathBuf>, oneshot::Sender<Result<ImportReport, String>>),
     Layout(LayoutOp, oneshot::Sender<Result<(), String>>),
     /// Redraw keys whose face changed; `true` sends every face again.
     AllFaces(bool),
+    /// The rest of a multi-action, after a pause.
+    Steps(Vec<Value>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -500,6 +564,7 @@ impl HostHandle {
             image_cache: HashMap::new(),
             shown: HashMap::new(),
             down: HashMap::new(),
+            auto_from: None,
         };
         runtime.spawn(state.run(rx));
         tx.send(Msg::AllFaces(true)).ok();
@@ -581,6 +646,17 @@ impl HostHandle {
         self.ask(Msg::View)
     }
 
+    /// Brings VSD Craft profiles (their folders) in as new profiles.
+    pub fn import_vsd(&self, dirs: Vec<PathBuf>) -> Result<ImportReport, String> {
+        self.ask(|o| Msg::ImportVsd(dirs, o))
+            .unwrap_or(Err("host stopped".into()))
+    }
+
+    /// The program in front changed (its file name, e.g. "obs64.exe").
+    pub fn foreground_app(&self, app: &str) {
+        let _ = self.tx.send(Msg::Foreground(app.into()));
+    }
+
     pub fn layout_op(&self, op: LayoutOp) -> Result<(), String> {
         self.ask(|o| Msg::Layout(op, o))
             .unwrap_or(Err("host stopped".into()))
@@ -633,6 +709,9 @@ struct State {
     /// The action each held key was pressed on, so its keyUp goes there
     /// even if the page changed in between.
     down: HashMap<usize, String>,
+    /// While an app has brought its profile up: the profile to go back to
+    /// when another app comes to the front.
+    auto_from: Option<String>,
 }
 
 fn layout_path(dir: &std::path::Path) -> PathBuf {
@@ -795,7 +874,25 @@ impl State {
             Msg::View(done) => {
                 let _ = done.send(self.layout.view());
             }
+            Msg::Foreground(app) => self.on_foreground(&app),
+            Msg::ImportVsd(dirs, done) => {
+                let r = self.import_vsd(&dirs);
+                if r.is_ok() {
+                    self.dirty = true;
+                    self.emit(HostEvent::PageChanged);
+                }
+                let _ = done.send(r);
+            }
             Msg::Layout(op, done) => {
+                // Choosing a profile yourself ends any app-chosen one.
+                if matches!(
+                    op,
+                    LayoutOp::SwitchProfile(_)
+                        | LayoutOp::AddProfile(_)
+                        | LayoutOp::RemoveProfile(_)
+                ) {
+                    self.auto_from = None;
+                }
                 let r = self.layout_op(op);
                 if r.is_ok() {
                     self.dirty = true;
@@ -803,6 +900,7 @@ impl State {
                 }
                 let _ = done.send(r);
             }
+            Msg::Steps(steps) => self.run_steps(steps),
             Msg::AllFaces(force) => {
                 if force {
                     self.shown.clear();
@@ -937,7 +1035,7 @@ impl State {
         };
         let mut face = if inst.plugin == BUILTIN {
             Face {
-                image: builtin::icon(&inst.action),
+                image: builtin::icon_for(&inst.action, inst.state),
                 title: builtin::default_title(&inst.action, &inst.settings),
                 show_title: true,
                 align: "bottom".into(),
@@ -1334,10 +1432,59 @@ impl State {
 
     // ---- Agora's own actions and navigation --------------------------------
 
+    /// Runs multi-action steps in order. A pause hands the rest to a timer.
+    fn run_steps(&mut self, mut steps: Vec<Value>) {
+        while !steps.is_empty() {
+            let step = steps.remove(0);
+            let action = step.get("action").and_then(Value::as_str).unwrap_or("");
+            if !builtin::step_allowed(action) {
+                continue;
+            }
+            if action == builtin::DELAY {
+                let ms = step
+                    .get("settings")
+                    .and_then(|s| s.get("ms"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(500);
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(ms.min(60_000))).await;
+                    let _ = tx.send(Msg::Steps(steps));
+                });
+                return;
+            }
+            let settings = step
+                .get("settings")
+                .cloned()
+                .filter(Value::is_object)
+                .unwrap_or_else(empty_object);
+            self.run_builtin(&Instance::new(BUILTIN, action, settings));
+        }
+    }
+
     fn run_builtin(&mut self, inst: &Instance) {
         let Some(def) = builtin::def(&inst.action) else {
             return;
         };
+        if inst.action == builtin::MULTI || inst.action == builtin::TOGGLE {
+            let list = |k: &str| {
+                inst.settings
+                    .get(k)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let steps = if inst.action == builtin::TOGGLE && inst.state == 1 {
+                list("steps_b")
+            } else {
+                list("steps")
+            };
+            if inst.action == builtin::TOGGLE {
+                self.flip_toggle(&inst.context);
+            }
+            self.run_steps(steps);
+            return;
+        }
         if !def.navigation {
             self.emit(HostEvent::Run {
                 action: inst.action.clone(),
@@ -1374,6 +1521,7 @@ impl State {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if self.layout.profiles.iter().any(|p| p.id == id) {
+                    self.auto_from = None;
                     self.switch_profile(id);
                     self.emit(HostEvent::PageChanged);
                 }
@@ -1385,6 +1533,18 @@ impl State {
             if self.go_to_page(&page) {
                 self.emit(HostEvent::PageChanged);
             }
+        }
+    }
+
+    /// A Toggle key remembers which set runs next.
+    fn flip_toggle(&mut self, context: &str) {
+        let key = self.key_of(context);
+        if let Some(k) = key {
+            if let Some(i) = self.layout.keys_mut().get_mut(&k) {
+                i.state = 1 - i.state.min(1);
+                self.dirty = true;
+            }
+            self.redraw(k);
         }
     }
 
@@ -1429,6 +1589,103 @@ impl State {
         self.dirty = true;
         self.enter_page();
         true
+    }
+
+    fn import_vsd(&mut self, dirs: &[PathBuf]) -> Result<ImportReport, String> {
+        let plugins = &self.plugins;
+        let known = |action: &str| {
+            plugins
+                .values()
+                .find(|p| p.action(action).is_some())
+                .map(|p| p.uuid.clone())
+        };
+        let (cols, rows) = (self.config.device.columns, self.config.device.rows);
+        let mut read = Vec::new();
+        let mut skipped = Vec::new();
+        for d in dirs {
+            let (p, s) = vsd_import::read(d, cols, rows, &known)?;
+            skipped.extend(s);
+            read.push(p);
+        }
+        // New ids first, so Scene Shift keys can point at each other.
+        let ids: HashMap<String, String> =
+            read.iter().map(|p| (p.id.clone(), new_context())).collect();
+        let mut report = ImportReport {
+            profiles: Vec::new(),
+            keys: 0,
+            skipped: Vec::new(),
+        };
+        for rp in read {
+            let mut pages = Vec::new();
+            for (n, page) in rp.pages.iter().enumerate() {
+                let top = Page::new(&format!("Page {}", n + 1), None);
+                let top_id = top.id.clone();
+                pages.push(top);
+                fill_page(&mut pages, &top_id, page, &ids, &mut report.keys);
+            }
+            let current = pages[0].id.clone();
+            let name = if rp.name.trim().is_empty() {
+                "Imported".to_string()
+            } else {
+                rp.name.clone()
+            };
+            report.profiles.push(name.clone());
+            self.layout.profiles.push(Profile {
+                id: ids[&rp.id].clone(),
+                name,
+                pages,
+                current,
+                apps: rp.apps,
+            });
+        }
+        // Plugins for keys on pages not showing start now, as at launch.
+        let needed: BTreeSet<String> = self
+            .layout
+            .instances()
+            .filter(|i| i.plugin != BUILTIN)
+            .map(|i| i.plugin.clone())
+            .collect();
+        for p in needed {
+            self.ensure_running(&p);
+        }
+        skipped.sort();
+        skipped.dedup();
+        report.skipped = skipped;
+        Ok(report)
+    }
+
+    /// Brings up the profile that lists the app now in front, and goes back
+    /// to the one you chose when an app without a profile comes forward.
+    fn on_foreground(&mut self, app: &str) {
+        let app = app.to_lowercase();
+        // Using Agora itself (to edit keys) keeps whatever is showing.
+        if app.is_empty() || app == "agora.exe" {
+            return;
+        }
+        let target = self
+            .layout
+            .profiles
+            .iter()
+            .find(|p| p.apps.contains(&app))
+            .map(|p| p.id.clone());
+        match target {
+            Some(t) if t == self.layout.active => {}
+            Some(t) => {
+                if self.auto_from.is_none() {
+                    self.auto_from = Some(self.layout.active.clone());
+                }
+                self.switch_profile(&t);
+                self.emit(HostEvent::PageChanged);
+            }
+            None => {
+                if let Some(back) = self.auto_from.take() {
+                    if self.layout.profiles.iter().any(|p| p.id == back) {
+                        self.switch_profile(&back);
+                        self.emit(HostEvent::PageChanged);
+                    }
+                }
+            }
+        }
     }
 
     fn switch_profile(&mut self, id: &str) {
@@ -1562,6 +1819,27 @@ impl State {
                 }
                 self.switch_profile(&id);
             }
+            LayoutOp::SetProfileApps(id, apps) => {
+                let mut clean_apps: Vec<String> = apps
+                    .iter()
+                    .map(|a| {
+                        a.trim()
+                            .rsplit(['\\', '/'])
+                            .next()
+                            .unwrap_or("")
+                            .to_lowercase()
+                    })
+                    .filter(|a| !a.is_empty())
+                    .collect();
+                clean_apps.dedup();
+                let p = self
+                    .layout
+                    .profiles
+                    .iter_mut()
+                    .find(|p| p.id == id)
+                    .ok_or("That profile is gone.")?;
+                p.apps = clean_apps;
+            }
         }
         Ok(())
     }
@@ -1630,7 +1908,7 @@ impl State {
                 action: d.id.into(),
                 name: d.name.into(),
                 tooltip: d.tooltip.into(),
-                icon: builtin::icon(d.id),
+                icon: builtin::list_icon(d.id),
                 group_icon: builtin::group_icon(d.group),
             })
             .collect();

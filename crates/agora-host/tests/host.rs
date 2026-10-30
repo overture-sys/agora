@@ -446,3 +446,71 @@ fn plugins_hear_about_page_changes() {
         |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "n=1"),
     );
 }
+
+#[test]
+fn multi_actions_run_in_order_and_toggles_alternate() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    let site = |u: &str| serde_json::json!({ "action": "website", "settings": { "url": u } });
+    let run_url =
+        |rx: &Receiver<HostEvent>| match wait_for(rx, 5, |e| matches!(e, HostEvent::Run { .. })) {
+            HostEvent::Run { settings, .. } => settings["url"].as_str().unwrap().to_string(),
+            _ => unreachable!(),
+        };
+
+    host.place(0, builtin::PLUGIN, builtin::MULTI).unwrap();
+    host.set_settings(
+        0,
+        serde_json::json!({ "steps": [
+            site("a"),
+            { "action": "delay", "settings": { "ms": 50 } },
+            { "action": "multi", "settings": {} },
+            site("b"),
+        ] }),
+    );
+    host.key(0, true);
+    host.key(0, false);
+    assert_eq!(run_url(&rx), "a");
+    assert_eq!(run_url(&rx), "b");
+
+    host.place(1, builtin::PLUGIN, builtin::TOGGLE).unwrap();
+    host.set_settings(
+        1,
+        serde_json::json!({ "steps": [site("on")], "steps_b": [site("off")] }),
+    );
+    for want in ["on", "off", "on"] {
+        host.key(1, true);
+        host.key(1, false);
+        assert_eq!(run_url(&rx), want);
+    }
+}
+
+#[test]
+fn profiles_follow_the_app_in_front() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, _rx) = start(data.path());
+    let home = host.layout().unwrap().profile;
+    host.layout_op(LayoutOp::AddProfile("OBS".into())).unwrap();
+    let obs = host.layout().unwrap().profile;
+    host.layout_op(LayoutOp::SetProfileApps(
+        obs.clone(),
+        vec![r"C:\Program Files\obs\OBS64.exe".into()],
+    ))
+    .unwrap();
+    assert_eq!(host.layout().unwrap().apps, vec!["obs64.exe"]);
+    host.layout_op(LayoutOp::SwitchProfile(home.clone()))
+        .unwrap();
+
+    host.foreground_app("obs64.exe");
+    assert_eq!(host.layout().unwrap().profile, obs);
+    // Agora's own window doesn't count.
+    host.foreground_app("agora.exe");
+    assert_eq!(host.layout().unwrap().profile, obs);
+    host.foreground_app("notepad.exe");
+    assert_eq!(host.layout().unwrap().profile, home);
+    // A profile you pick yourself stays when apps change.
+    host.layout_op(LayoutOp::SwitchProfile(obs.clone()))
+        .unwrap();
+    host.foreground_app("notepad.exe");
+    assert_eq!(host.layout().unwrap().profile, obs);
+}

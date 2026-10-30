@@ -2,6 +2,7 @@
 // host. Keys show what their plugins draw; presses go to the plugins.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod foreground;
 mod system;
 
 use std::collections::HashMap;
@@ -39,6 +40,11 @@ struct Settings {
     /// Also load the plugins installed for VSD Craft (read only). Off while
     /// Agora is being built and tested.
     use_vsd_craft_plugins: bool,
+    /// Start Agora (in the tray) when Windows starts.
+    start_with_windows: bool,
+    /// Each light's colour (22 ring + 2 front), when painted one by one.
+    /// Empty means the whole ring is `ring_color`.
+    ring_colors: Vec<String>,
 }
 
 impl Default for Settings {
@@ -49,6 +55,8 @@ impl Default for Settings {
             ring_on: false,
             ring_brightness: 100,
             use_vsd_craft_plugins: false,
+            start_with_windows: false,
+            ring_colors: Vec::new(),
         }
     }
 }
@@ -69,6 +77,15 @@ fn save_settings(path: &std::path::Path, settings: &Settings) {
     }
 }
 
+/// The 24 colours the ring shows with these settings.
+fn ring_lights(s: &Settings) -> Vec<Rgb> {
+    if s.ring_colors.len() == 24 {
+        s.ring_colors.iter().map(|c| hex_rgb(c)).collect()
+    } else {
+        vec![hex_rgb(&s.ring_color); 24]
+    }
+}
+
 fn hex_rgb(color: &str) -> Rgb {
     let hex = color.trim_start_matches('#');
     let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0);
@@ -79,7 +96,7 @@ fn hex_rgb(color: &str) -> Rgb {
 fn apply_settings(worker: &DockWorker, s: &Settings) {
     worker.send(Command::Brightness(s.brightness));
     if s.ring_on {
-        worker.send(Command::Ring(vec![hex_rgb(&s.ring_color); 24]));
+        worker.send(Command::Ring(ring_lights(s)));
         worker.send(Command::RingBrightness(s.ring_brightness));
     }
 }
@@ -132,6 +149,9 @@ type Shared = Arc<Mutex<Dock>>;
 
 /// The plugin host. Taken out and dropped on quit so plugins are stopped.
 type Host = Arc<Mutex<Option<HostHandle>>>;
+
+/// Programs recently in front, newest first, for picking a profile's apps.
+type RecentApps = Arc<Mutex<Vec<String>>>;
 
 /// Latest preview of each key for the window, as PNG data URIs.
 type Previews = Arc<Mutex<HashMap<usize, String>>>;
@@ -217,6 +237,29 @@ fn set_ring(state: State<Shared>, color: String) -> Result<(), String> {
     dock.change(
         |s| {
             s.ring_color = color.clone();
+            s.ring_colors.clear();
+            s.ring_on = true;
+        },
+        cmds,
+    )
+}
+
+/// Paints the lights one by one: 24 "#rrggbb" colours, ring 0-21 then
+/// the two on the front.
+#[tauri::command]
+fn set_ring_lights(state: State<Shared>, colors: Vec<String>) -> Result<(), String> {
+    if colors.len() != 24 {
+        return Err("The ring needs 24 colours".into());
+    }
+    let mut dock = state.lock().unwrap();
+    let level = dock.settings.ring_brightness;
+    let cmds = vec![
+        Command::Ring(colors.iter().map(|c| hex_rgb(c)).collect()),
+        Command::RingBrightness(level),
+    ];
+    dock.change(
+        |s| {
+            s.ring_colors = colors.clone();
             s.ring_on = true;
         },
         cmds,
@@ -295,6 +338,53 @@ fn move_key(host: State<Host>, from: usize, to: usize) -> Result<(), String> {
     with_host(&host, |h| h.move_key(from, to))
 }
 
+/// Adds or removes Agora in Windows' list of apps that start at sign-in
+/// (HKCU\...\Run). It starts in the tray, without a window.
+fn register_autostart(on: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+        let mut cmd = std::process::Command::new("reg");
+        if on {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let value = format!("\"{}\" --tray", exe.display());
+            cmd.args([
+                "add", key, "/v", "Agora", "/t", "REG_SZ", "/d", &value, "/f",
+            ]);
+        } else {
+            cmd.args(["delete", key, "/v", "Agora", "/f"]);
+        }
+        let out = cmd
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| e.to_string())?;
+        // Deleting an entry that isn't there is fine.
+        if !out.status.success() && on {
+            return Err(format!(
+                "Windows didn't accept it: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = on;
+        Err("Starting with the system only works on Windows so far".into())
+    }
+}
+
+#[tauri::command]
+fn set_start_with_windows(state: State<Shared>, on: bool) -> Result<(), String> {
+    register_autostart(on)?;
+    let mut dock = state.lock().unwrap();
+    dock.settings.start_with_windows = on;
+    save_settings(&dock.settings_path, &dock.settings);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_layout(host: State<Host>) -> Result<Option<LayoutView>, String> {
     with_host(&host, |h| h.layout())
@@ -307,6 +397,7 @@ fn layout_op(
     op: String,
     id: Option<String>,
     name: Option<String>,
+    apps: Option<Vec<String>>,
 ) -> Result<(), String> {
     let id = id.unwrap_or_default();
     let name = name.unwrap_or_default();
@@ -319,9 +410,76 @@ fn layout_op(
         "remove-profile" => LayoutOp::RemoveProfile(id),
         "rename-profile" => LayoutOp::RenameProfile(id, name),
         "switch-profile" => LayoutOp::SwitchProfile(id),
+        "set-profile-apps" => LayoutOp::SetProfileApps(id, apps.unwrap_or_default()),
         other => return Err(format!("unknown change {other}")),
     };
     with_host(&host, |h| h.layout_op(op))?
+}
+
+/// VSD Craft's own profiles folder (read only).
+fn vsd_profiles_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|a| {
+        PathBuf::from(a)
+            .join("HotSpot")
+            .join("StreamDock")
+            .join("profiles")
+    })
+}
+
+/// VSD Craft profiles made for the M18 that Agora can bring in.
+#[tauri::command]
+fn list_vsd_profiles() -> Vec<agora_host::vsd_import::VsdProfile> {
+    vsd_profiles_dir()
+        .map(|d| agora_host::vsd_import::list(&d, "VSDM18"))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn import_vsd_profiles(
+    host: State<Host>,
+    dirs: Vec<String>,
+) -> Result<agora_host::ImportReport, String> {
+    let root = vsd_profiles_dir().ok_or("Can't find VSD Craft's profiles")?;
+    // Only folders from VSD Craft's profiles folder.
+    let dirs: Vec<PathBuf> = dirs
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|d| d.starts_with(&root))
+        .collect();
+    if dirs.is_empty() {
+        return Err("Pick at least one profile".into());
+    }
+    with_host(&host, |h| h.import_vsd(dirs))?
+}
+
+#[tauri::command]
+fn recent_apps(recent: State<RecentApps>) -> Vec<String> {
+    recent.lock().unwrap().clone()
+}
+
+/// Watches which program is in front and tells the host when it changes,
+/// so profiles can follow apps.
+fn watch_foreground(host: Host, recent: RecentApps) {
+    let mut last = String::new();
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let Some(app) = foreground::app() else {
+            continue;
+        };
+        if app == last {
+            continue;
+        }
+        last = app.clone();
+        if app != "agora.exe" {
+            let mut list = recent.lock().unwrap();
+            list.retain(|a| *a != app);
+            list.insert(0, app.clone());
+            list.truncate(12);
+        }
+        if let Some(h) = host.lock().unwrap().as_ref() {
+            h.foreground_app(&app);
+        }
+    }
 }
 
 #[tauri::command]
@@ -371,14 +529,16 @@ fn run_dock_action(
             "off" => false,
             _ => !cur.ring_on,
         };
-        let color = if mode == "color" {
-            color
-        } else {
-            cur.ring_color.clone()
-        };
+        // "Set a colour" fills the ring; otherwise it comes back as it was,
+        // painted lights included.
+        let mut next = cur.clone();
+        if mode == "color" {
+            next.ring_color = color;
+            next.ring_colors.clear();
+        }
         let cmds = if on {
             vec![
-                Command::Ring(vec![hex_rgb(&color); 24]),
+                Command::Ring(ring_lights(&next)),
                 Command::RingBrightness(cur.ring_brightness),
             ]
         } else {
@@ -387,7 +547,8 @@ fn run_dock_action(
         dock.change(
             |s| {
                 s.ring_on = on;
-                s.ring_color = color.clone();
+                s.ring_color = next.ring_color.clone();
+                s.ring_colors = next.ring_colors.clone();
             },
             cmds,
         )
@@ -793,12 +954,23 @@ fn main() {
     let shared: Shared = Arc::default();
     let host: Host = Arc::default();
     let previews: Previews = Arc::default();
+    let recent: RecentApps = Arc::default();
 
     tauri::Builder::default()
+        // A second copy (e.g. opened while the sign-in one runs in the
+        // tray) shows the first one's window instead of fighting over the dock.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(shared.clone())
         .manage(host.clone())
         .manage(previews.clone())
+        .manage(recent.clone())
         .invoke_handler(tauri::generate_handler![
             dock_status,
             set_brightness,
@@ -820,6 +992,11 @@ fn main() {
             key_previews,
             get_layout,
             layout_op,
+            set_start_with_windows,
+            set_ring_lights,
+            recent_apps,
+            list_vsd_profiles,
+            import_vsd_profiles,
             set_key_settings,
             set_key_look
         ])
@@ -856,6 +1033,16 @@ fn main() {
                 let mut dock = shared.lock().unwrap();
                 dock.settings_path = data_dir(&handle).join("settings.json");
                 dock.settings = load_settings(&dock.settings_path);
+                // Keeps the entry pointing at this agora.exe if it moved.
+                if dock.settings.start_with_windows {
+                    let _ = register_autostart(true);
+                }
+            }
+            // Started by Windows at sign-in: stay in the tray.
+            if !std::env::args().any(|a| a == "--tray") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                }
             }
             if let Err(e) = restart_host(&handle, &host, &shared, &previews) {
                 eprintln!("plugin host didn't start: {e}");
@@ -865,6 +1052,10 @@ fn main() {
             std::thread::Builder::new()
                 .name("agora-connect".into())
                 .spawn(move || connection_loop(handle, shared, host))?;
+            let watched = app.state::<Host>().inner().clone();
+            std::thread::Builder::new()
+                .name("agora-foreground".into())
+                .spawn(move || watch_foreground(watched, recent))?;
             Ok(())
         })
         .on_window_event(|window, event| {

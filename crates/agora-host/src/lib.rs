@@ -15,11 +15,12 @@ mod host;
 mod launch;
 pub mod manifest;
 mod server;
+pub mod vsd_import;
 
 pub use face::{Face, Overlay};
 pub use host::{
-    ActionInfo, DeviceDesc, HostEvent, HostHandle, KeyInfo, LayoutOp, LayoutView, Look, NameId,
-    PluginInfo,
+    ActionInfo, DeviceDesc, HostEvent, HostHandle, ImportReport, KeyInfo, LayoutOp, LayoutView,
+    Look, NameId, PluginInfo,
 };
 pub use manifest::{Plugin, Source};
 

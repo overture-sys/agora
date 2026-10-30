@@ -191,13 +191,13 @@ fn buttons() -> R<()> {
     }
     let msg = format!("buttons: left=0x{:02x} middle=0x{:02x} right=0x{:02x}", ids[0], ids[1], ids[2]);
     println!("\n{msg}");
-    let matches_default = ids == [0x25, 0x31, 0x30];
+    let matches_default = ids == [0x25, 0x30, 0x31];
     println!(
         "{}",
         if matches_default {
-            "This matches Agora's default (0x25, 0x31, 0x30)."
+            "This matches Agora's default (0x25, 0x30, 0x31)."
         } else {
-            "This differs from Agora's default (0x25, 0x31, 0x30); Claude will update the driver."
+            "This differs from Agora's default (0x25, 0x30, 0x31); Claude will update the driver."
         }
     );
     record(&msg);
@@ -239,7 +239,7 @@ fn wait_for_button(events: &Receiver<Event>, timeout: Duration) -> R<u8> {
 fn name(c: Control) -> String {
     match c {
         Control::Key(k) => format!("key {} (row {}, col {})", k + 1, k / 5 + 1, k % 5 + 1),
-        Control::Button(b) => format!("{b:?} button (default map, unconfirmed)").to_lowercase(),
+        Control::Button(b) => format!("{b:?} button").to_lowercase(),
         Control::Unknown(id) => format!("unknown control 0x{id:02x}"),
     }
 }

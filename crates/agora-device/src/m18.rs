@@ -6,7 +6,8 @@
 //! - Every command starts with `CRT\0\0`.
 //! - Start: DIS, CONNECT, CLE 0xff, STP. Re-send LIG every 8 s or the dock
 //!   falls back to its stock screen.
-//! - Key image: 64x64 JPEG, sent as BAT + raw 1024-byte pages + STP.
+//! - Key image: 64x64 JPEG, sent as BAT + raw 1024-byte pages + STP. Sent
+//!   upright (no rotation), confirmed 2026-10-30.
 //! - Image ids count from the bottom row; event ids count from the top row.
 //! - Light ring: SETLB with 24 RGB triples. Send colour before brightness.
 //! - Close: CLE 00 44 43, then HAN. DELED resets the ring.
@@ -27,9 +28,8 @@ pub const LAYOUT: Layout = Layout { rows: 3, columns: 5, key_size: 64, buttons: 
 
 /// Which raw ids belong to the round buttons.
 ///
-/// Left is confirmed as 0x25. Devin's left-to-right test suggested 0x31 for
-/// the middle and 0x30 for the right, which is the reverse of the public
-/// notes. Not yet confirmed one button at a time; `agora-m18 buttons` does that.
+/// Confirmed one button at a time on Devin's M18 with `agora-m18 buttons`
+/// (2026-10-30): left 0x25, middle 0x30, right 0x31, as in the public notes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ButtonMap {
     pub left: u8,
@@ -39,7 +39,7 @@ pub struct ButtonMap {
 
 impl Default for ButtonMap {
     fn default() -> Self {
-        Self { left: 0x25, middle: 0x31, right: 0x30 }
+        Self { left: 0x25, middle: 0x30, right: 0x31 }
     }
 }
 
@@ -253,8 +253,8 @@ mod tests {
         assert!(e.pressed);
         assert_eq!(parse_event(&report(0x0F, 0), &b).unwrap().control, Control::Key(14));
         assert_eq!(parse_event(&report(0x25, 1), &b).unwrap().control, Control::Button(Button::Left));
-        assert_eq!(parse_event(&report(0x31, 1), &b).unwrap().control, Control::Button(Button::Middle));
-        assert_eq!(parse_event(&report(0x30, 1), &b).unwrap().control, Control::Button(Button::Right));
+        assert_eq!(parse_event(&report(0x30, 1), &b).unwrap().control, Control::Button(Button::Middle));
+        assert_eq!(parse_event(&report(0x31, 1), &b).unwrap().control, Control::Button(Button::Right));
         assert_eq!(parse_event(&report(0x40, 1), &b).unwrap().control, Control::Unknown(0x40));
         assert!(parse_event(b"NAK", &b).is_none());
     }

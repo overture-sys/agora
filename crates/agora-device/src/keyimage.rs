@@ -9,7 +9,7 @@ pub use image::DynamicImage;
 use crate::{glyphs, Error, Result};
 
 /// How a model's screen is turned relative to the picture we send.
-/// Unknown for the M18 until `agora-m18 orient` has been run on the dock.
+/// The M18 shows images upright (checked with `agora-m18 orient`, 2026-10-30).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Orientation {
     #[default]

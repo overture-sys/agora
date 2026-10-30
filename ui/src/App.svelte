@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+  import "@fontsource/marcellus-sc/400.css";
 
   type Status = { connected: boolean; model: string | null; rows: number; columns: number; message: string };
   type Input = { kind: "key" | "button" | "unknown"; index: number; pressed: boolean; raw_id: number };
@@ -37,16 +38,24 @@
     const saved = JSON.parse(localStorage.getItem("agora.openGroups") ?? "[]");
     if (Array.isArray(saved)) openGroups = new Set(saved);
   } catch {}
-  let log = $state<string[]>([]);
+  type LogLine = { time: string; text: string; err: boolean };
+  let log = $state<LogLine[]>([]);
+  let ringOn = $state(false);
+  // 24 LEDs around an oval, for the ring preview.
+  const leds = Array.from({ length: 24 }, (_, i) => {
+    const t = (i / 24) * Math.PI * 2;
+    return { x: 60 + 50 * Math.cos(t), y: 40 + 30 * Math.sin(t) };
+  });
   let brightness = $state(80);
-  let ringColor = $state("#0050ff");
+  let ringColor = $state("#d9794a");
   let error = $state("");
 
   const buttonNames = ["Left", "Middle", "Right"];
 
   function addLog(line: string) {
-    const t = new Date().toLocaleTimeString();
-    log = [`${t}  ${line}`, ...log].slice(0, 200);
+    const time = new Date().toLocaleTimeString([], { hour12: false });
+    const err = /error|crash|couldn't|failed|gave up/i.test(line);
+    log = [{ time, text: line, err }, ...log].slice(0, 200);
   }
 
   async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T | undefined> {
@@ -176,12 +185,16 @@
 
 <main>
   <header>
-    <h1>Agora</h1>
-    <span class="status" class:on={status.connected}>{status.message || (status.connected ? "Connected" : "Not connected")}</span>
+    <div class="head-row">
+      <h1>Agora</h1>
+      <span class="pill" class:off={!status.connected}>{status.message || (status.connected ? "Connected" : "Not connected")}</span>
+    </div>
+    <div class="meander"></div>
   </header>
 
   <div class="left">
     <section class="device">
+      <div class="meander"></div>
       <div class="grid" style="grid-template-columns: repeat({status.columns}, 1fr)">
         {#each Array(status.rows * status.columns) as _, k}
           <button
@@ -214,7 +227,12 @@
             }}
             title={previews[k] ? `Key ${k + 1}: drag to move it` : `Key ${k + 1}`}
           >
-            {#if previews[k]}<img src={previews[k]} alt="" draggable="false" />{:else}<span>{k + 1}</span>{/if}
+            {#if previews[k]}<img src={previews[k]} alt="" draggable="false" />{:else}<span class="num">{k + 1}</span>
+              <svg class="palm" viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"
+                ><path d="M20 34V22" /><path
+                  d="M20 22c0-8 0-14 0-18M20 22c-2-6-5-11-9-14M20 22c2-6 5-11 9-14M20 22c-5-3-9-6-14-6M20 22c5-3 9-6 14-6"
+                /><path d="M12 34c2-3 5-4 8-4s6 1 8 4" /></svg
+              >{/if}
           </button>
         {/each}
       </div>
@@ -228,12 +246,26 @@
     <section class="controls">
       <label>
         Brightness {brightness}%
-        <input type="range" min="0" max="100" bind:value={brightness} onchange={() => call("set_brightness", { percent: brightness })} />
+        <input
+          type="range"
+          min="0"
+          max="100"
+          bind:value={brightness}
+          style="--fill: {brightness}%"
+          onchange={() => call("set_brightness", { percent: brightness })}
+        />
       </label>
-      <div class="row">
-        <label>Light ring <input type="color" bind:value={ringColor} /></label>
-        <button onclick={() => call("set_ring", { color: ringColor })}>Set ring</button>
-        <button onclick={() => call("ring_off")}>Ring off</button>
+      <div class="ring">
+        <svg class="orbit" viewBox="0 0 120 80" role="img" aria-label="Light ring, 24 LEDs">
+          <ellipse cx="60" cy="40" rx="50" ry="30" fill="none" stroke="var(--line)" stroke-width="1" />
+          {#each leds as l}<circle cx={l.x} cy={l.y} r="3.2" fill={ringOn ? ringColor : "var(--line)"} />{/each}
+          <circle cx="60" cy="40" r="11" fill={ringColor} stroke="var(--key)" stroke-width="2" />
+        </svg>
+        <div class="ring-actions">
+          <label class="ring-pick">Light ring <input type="color" bind:value={ringColor} /></label>
+          <button class="primary" onclick={async () => { await call("set_ring", { color: ringColor }); ringOn = !error; }}>Set ring</button>
+          <button onclick={async () => { await call("ring_off"); ringOn = false; }}>Ring off</button>
+        </div>
       </div>
       {#if error}<p class="error">{error}</p>{/if}
     </section>
@@ -243,13 +275,16 @@
         <h2>Plugins</h2>
         <button onclick={() => call("open_plugins_folder")}>Open plugins folder</button>
       </div>
-      {#if plugins.length === 0}<p class="muted">No plugins found. Put plugin folders in %APPDATA%\Agora\plugins.</p>{/if}
+      {#if plugins.length === 0}
+        <p class="horos"><b>ΗΟΡΟΣ ΕΙΜΙ ΤΕΣ ΑΓΟΡΑΣ</b>"I am the boundary of the Agora." No plugins yet: put plugin folders in %APPDATA%\Agora\plugins.</p>
+      {/if}
       {#each plugins as p}
         <div class="plugin" class:hidden={p.hidden}>
           <div class="plugin-text">
             <span>{p.name} <span class="muted">{p.version}</span></span>
             <span class="muted small">
-              {p.source === "Agora" ? "Agora" : "from VSD Craft"} · {p.hidden ? "hidden" : p.status}
+              <span class="tag" class:agora={p.source === "Agora"}>{p.source === "Agora" ? "Agora" : "from VSD Craft"}</span>
+              {p.hidden ? "hidden" : p.status}
             </span>
           </div>
           <div class="row">
@@ -274,9 +309,10 @@
   </div>
 
   <section class="side">
+    <div class="triglyph"></div>
     {#if picking}
       <div class="side-head">
-        <h2>Pick an action for key {selected + 1}</h2>
+        <h2>Pick an action for key <span class="k">{selected + 1}</span></h2>
         {#if info}<button onclick={() => (picking = false)}>Cancel</button>{/if}
       </div>
       <input class="search" placeholder="Search actions" bind:value={search} />
@@ -318,12 +354,12 @@
     {:else if info}
       <div class="side-head">
         <div>
-          <h2>Key {selected + 1}: {info.name}</h2>
+          <h2><span class="k">Key {selected + 1}</span> · {info.name}</h2>
           <div class="muted">{info.plugin_name}</div>
         </div>
         <div class="row">
-          <button onclick={() => (picking = true)}>Change</button>
-          <button onclick={removeKey}>Remove</button>
+          <button class="primary" onclick={() => (picking = true)}>Change</button>
+          <button class="danger" onclick={removeKey}>Remove</button>
         </div>
       </div>
       {#if info.settings_url}
@@ -339,6 +375,8 @@
   <section class="log">
     <h2>Activity</h2>
     {#if log.length === 0}<p class="muted">Plugin messages show up here.</p>{/if}
-    {#each log as line}<div>{line}</div>{/each}
+    <div class="lines">
+      {#each log as line}<div class="ostrakon" class:err={line.err}><time>{line.time}</time>{line.text}</div>{/each}
+    </div>
   </section>
 </main>

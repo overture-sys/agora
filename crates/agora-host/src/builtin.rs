@@ -188,6 +188,7 @@ pub fn default_title(id: &str, settings: &Value) -> String {
     };
     match id {
         FOLDER => s("name"),
+        BACK => "Back".into(),
         GO_TO_PAGE => format!(
             "Page {}",
             settings.get("page").and_then(Value::as_u64).unwrap_or(1)

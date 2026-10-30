@@ -84,7 +84,24 @@
     else pressedKeys = next;
   }
 
+  // What's being dragged: an action from the list, or a key that has one.
   let dragged: Action | null = null;
+  let draggedKey: number | null = null;
+  let dropTarget = $state<number | null>(null);
+
+  async function dropOn(k: number) {
+    dropTarget = null;
+    if (dragged) {
+      await place(k, dragged);
+    } else if (draggedKey !== null && draggedKey !== k) {
+      const from = draggedKey;
+      await call("move_key", { from, to: k });
+      // Keep the moved action selected.
+      await loadKey(selected === from ? k : selected === k ? from : selected);
+    }
+    dragged = null;
+    draggedKey = null;
+  }
 
   onMount(() => {
     invoke<Status>("dock_status").then((s) => (status = { ...s, message: s.message || status.message }));
@@ -131,13 +148,31 @@
             class="key"
             class:pressed={pressedKeys.has(k)}
             class:selected={selected === k}
+            class:drop={dropTarget === k}
             onclick={() => loadKey(k)}
-            ondragover={(e) => e.preventDefault()}
+            draggable={previews[k] ? "true" : "false"}
+            ondragstart={(e) => {
+              draggedKey = k;
+              e.dataTransfer?.setData("text/plain", `key:${k}`);
+              if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+            }}
+            ondragend={() => {
+              draggedKey = null;
+              dropTarget = null;
+            }}
+            ondragover={(e) => {
+              if (!dragged && draggedKey === null) return;
+              e.preventDefault();
+              dropTarget = k;
+            }}
+            ondragleave={() => {
+              if (dropTarget === k) dropTarget = null;
+            }}
             ondrop={(e) => {
               e.preventDefault();
-              if (dragged) place(k, dragged);
+              dropOn(k);
             }}
-            title="Key {k + 1}"
+            title={previews[k] ? `Key ${k + 1}: drag to move it` : `Key ${k + 1}`}
           >
             {#if previews[k]}<img src={previews[k]} alt="" draggable="false" />{:else}<span>{k + 1}</span>{/if}
           </button>
@@ -182,7 +217,7 @@
         {#if info}<button onclick={() => (picking = false)}>Cancel</button>{/if}
       </div>
       <input class="search" placeholder="Search actions" bind:value={search} />
-      <p class="muted hint">Click an action, or drag it onto any key.</p>
+      <p class="muted hint">Click an action, or drag it onto any key. Drag a key onto another key to move it (two used keys swap).</p>
       <div class="actions">
         {#each groups as [group, list]}
           <h3>{group}</h3>
@@ -190,8 +225,14 @@
             <button
               class="action"
               draggable="true"
-              ondragstart={() => (dragged = a)}
-              ondragend={() => (dragged = null)}
+              ondragstart={(e) => {
+                dragged = a;
+                e.dataTransfer?.setData("text/plain", `action:${a.action}`);
+              }}
+              ondragend={() => {
+                dragged = null;
+                dropTarget = null;
+              }}
               onclick={() => place(selected, a)}
               title={a.tooltip}
             >

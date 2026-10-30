@@ -50,6 +50,7 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
 }
 .key img { width: 100%; height: 100%; display: block; }
 .key.selected { border-color: var(--accent); }
+.key.drop { border-color: var(--ok); border-style: dashed; transform: scale(1.04); }
 .key.pressed { transform: scale(0.94); }
 .round.pressed { background: var(--pressed); }
 .buttons { display: flex; gap: 40px; }

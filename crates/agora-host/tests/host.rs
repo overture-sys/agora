@@ -129,3 +129,34 @@ fn layout_survives_restart() {
     wait_for(&rx, 10, |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "hello"));
     assert_eq!(host.key_info(4).unwrap().name, "Counter");
 }
+
+#[test]
+fn moving_a_key_keeps_the_action_and_swaps() {
+    if !node_ok() {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter").unwrap();
+    wait_for(&rx, 10, |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello"));
+    let context = host.key_info(0).unwrap().settings_url.unwrap();
+
+    // Onto an empty key: the old key goes blank and the plugin redraws the new one.
+    host.move_key(0, 3);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 0, face } if face.image.is_none() && face.title.is_empty()));
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 3, face } if face.title == "hello"));
+    assert!(host.key_info(0).is_none());
+    let moved = host.key_info(3).unwrap().settings_url.unwrap();
+    let ctx = |u: &str| u.split("uuid=").nth(1).unwrap().split('&').next().unwrap().to_string();
+    assert_eq!(ctx(&context), ctx(&moved), "same action instance");
+    host.key(3, true);
+    host.key(3, false);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 3, face } if face.title == "n=1"));
+
+    // Onto a used key: the two swap.
+    host.place(1, "com.agora.testplugin", "com.agora.testplugin.counter").unwrap();
+    host.move_key(3, 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(ctx(&host.key_info(1).unwrap().settings_url.unwrap()), ctx(&moved));
+    assert!(host.key_info(3).is_some());
+}

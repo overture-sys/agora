@@ -145,6 +145,11 @@ fn clear_key(host: State<Host>, key: usize) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn move_key(host: State<Host>, from: usize, to: usize) -> Result<(), String> {
+    with_host(&host, |h| h.move_key(from, to))
+}
+
+#[tauri::command]
 fn key_previews(previews: State<Previews>) -> Vec<Preview> {
     let map = previews.lock().unwrap();
     map.iter().map(|(&key, image)| Preview { key, image: Some(image.clone()) }).collect()
@@ -376,6 +381,7 @@ fn main() {
             key_info,
             place_action,
             clear_key,
+            move_key,
             key_previews
         ])
         .setup(move |app| {

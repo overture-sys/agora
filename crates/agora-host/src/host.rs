@@ -115,6 +115,7 @@ pub(crate) enum Msg {
     Restart(String),
     Place(usize, String, String, oneshot::Sender<Result<(), String>>),
     Clear(usize),
+    Move(usize, usize),
     Key(usize, bool),
     DeviceConnected(bool),
     Actions(oneshot::Sender<Vec<ActionInfo>>),
@@ -185,6 +186,11 @@ impl HostHandle {
 
     pub fn clear(&self, key: usize) {
         let _ = self.tx.send(Msg::Clear(key));
+    }
+
+    /// Moves the action on `from` to `to`. Whatever was on `to` swaps to `from`.
+    pub fn move_key(&self, from: usize, to: usize) {
+        let _ = self.tx.send(Msg::Move(from, to));
     }
 
     pub fn key(&self, key: usize, pressed: bool) {
@@ -348,6 +354,7 @@ impl State {
                 let _ = done.send(self.place(key, &plugin, &action));
             }
             Msg::Clear(key) => self.clear(key),
+            Msg::Move(from, to) => self.move_key(from, to),
             Msg::Key(key, pressed) => self.on_key(key, pressed),
             Msg::DeviceConnected(c) => self.on_device(c),
             Msg::Actions(done) => {
@@ -655,6 +662,35 @@ impl State {
         self.show(key, Face::default());
         if !self.layout.keys.values().any(|i| i.plugin == inst.plugin) {
             self.stop_plugin(&inst.plugin);
+        }
+    }
+
+    fn move_key(&mut self, from: usize, to: usize) {
+        let count = self.config.device.rows * self.config.device.columns;
+        if from == to || from >= count || to >= count || !self.layout.keys.contains_key(&from) {
+            return;
+        }
+        // Plugins see the action leave its old spot and appear at the new one;
+        // the context stays the same, so settings and open panels carry over.
+        let moved: Vec<usize> = [from, to].into_iter().filter(|k| self.layout.keys.contains_key(k)).collect();
+        for &k in &moved {
+            self.send_instance(k, "willDisappear", json!({ "controller": "Keypad" }));
+        }
+        let a = self.layout.keys.remove(&from);
+        let b = self.layout.keys.remove(&to);
+        if let Some(a) = a {
+            self.layout.keys.insert(to, a);
+        }
+        if let Some(b) = b {
+            self.layout.keys.insert(from, b);
+        }
+        self.dirty = true;
+        for k in [from, to] {
+            self.redraw(k);
+            let connected = self.layout.keys.get(&k).is_some_and(|i| self.plugin_conn.contains_key(&i.plugin));
+            if connected {
+                self.appear(k);
+            }
         }
     }
 

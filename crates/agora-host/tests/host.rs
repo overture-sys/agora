@@ -8,7 +8,8 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use agora_host::{
-    builtin, Config, DeviceDesc, HostEvent, HostHandle, LayoutOp, Look, Overlay, Source,
+    builtin, Config, DeviceDesc, DialInput, HostEvent, HostHandle, LayoutOp, Look, Overlay, Source,
+    BUTTON_BASE, DIAL_BASE,
 };
 
 fn node_ok() -> bool {
@@ -38,6 +39,8 @@ fn start(data: &std::path::Path) -> (HostHandle, Receiver<HostEvent>) {
             name: "Stream Dock M18".into(),
             rows: 3,
             columns: 5,
+            buttons: 3,
+            dials: 2,
         },
     };
     (HostHandle::start(config, tx).unwrap(), rx)
@@ -93,7 +96,8 @@ fn node_plugin_round_trip() {
     host.device_connected(true);
 
     let actions = plugin_actions(&host);
-    assert_eq!(actions.len(), 1);
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[1].controllers, ["Encoder"]);
     assert!(actions[0]
         .icon
         .as_deref()
@@ -295,7 +299,7 @@ fn hiding_and_forgetting_plugins() {
     assert!(plugin_actions(&host).is_empty());
     assert!(host.plugins()[0].hidden);
     host.set_hidden("com.agora.testplugin", false);
-    assert_eq!(plugin_actions(&host).len(), 1);
+    assert_eq!(plugin_actions(&host).len(), 2);
 
     // Forgetting drops it and hands back its folder.
     let dir = host.forget("com.agora.testplugin").unwrap();
@@ -513,4 +517,105 @@ fn profiles_follow_the_app_in_front() {
         .unwrap();
     host.foreground_app("notepad.exe");
     assert_eq!(host.layout().unwrap().profile, obs);
+}
+
+#[test]
+fn buttons_and_knobs_hold_actions() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    let b = BUTTON_BASE;
+    let d = DIAL_BASE;
+
+    // A round button takes a key action; one past the last doesn't exist.
+    host.place(b, builtin::PLUGIN, builtin::NEXT_PAGE).unwrap();
+    assert!(host
+        .place(b + 3, builtin::PLUGIN, builtin::NEXT_PAGE)
+        .is_err());
+    // Knobs take Knob, keys don't.
+    assert!(host.place(d, builtin::PLUGIN, builtin::NEXT_PAGE).is_err());
+    assert!(host.place(0, builtin::PLUGIN, builtin::DIAL).is_err());
+    assert!(host.place(d + 2, builtin::PLUGIN, builtin::DIAL).is_err());
+    host.place(d, builtin::PLUGIN, builtin::DIAL).unwrap();
+    // Knobs only swap with knobs.
+    host.move_key(d, 1);
+    assert!(host.key_info(d).is_some());
+
+    // Turning left runs its steps: here, add a page then go to it via the
+    // next-page key on the button.
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    let first = host.layout().unwrap().pages[0].id.clone();
+    host.layout_op(LayoutOp::GoToPage(first.clone())).unwrap();
+    host.key(b, true);
+    host.key(b, false);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::PageChanged));
+    assert_ne!(host.layout().unwrap().page, first);
+
+    // Buttons and knobs are per page; back on the first page the knob runs
+    // "previous page" when turned left.
+    host.layout_op(LayoutOp::GoToPage(first.clone())).unwrap();
+    host.set_settings(
+        d,
+        serde_json::json!({ "left": [{ "action": "next-page", "settings": {} }], "right": [], "press": [] }),
+    );
+    host.dial(0, DialInput::Turn(-1));
+    let end = Instant::now() + Duration::from_secs(5);
+    while host.layout().unwrap().page == first && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_ne!(host.layout().unwrap().page, first);
+
+    // A swipe to the right goes back a page.
+    host.swipe(1);
+    let end = Instant::now() + Duration::from_secs(5);
+    while host.layout().unwrap().page != first && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(host.layout().unwrap().page, first);
+}
+
+#[test]
+fn plugins_hear_knobs() {
+    if !node_ok() {
+        eprintln!("skipping: needs Node 22+ on PATH");
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.device_connected(true);
+    let d = DIAL_BASE + 1;
+    assert!(host
+        .place(d, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .is_err());
+    host.place(d, "com.agora.testplugin", "com.agora.testplugin.volume")
+        .unwrap();
+    wait_for(
+        &rx,
+        10,
+        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "hello"),
+    );
+    host.dial(1, DialInput::Turn(2));
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "Encoder 2"),
+    );
+    host.dial(1, DialInput::Press);
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "down"),
+    );
+    host.dial(1, DialInput::Turn(-1));
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "Encoder -1 held"),
+    );
+    host.dial(1, DialInput::Release);
+    host.dial(1, DialInput::Tap);
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "tap"),
+    );
 }

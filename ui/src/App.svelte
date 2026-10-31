@@ -5,9 +5,12 @@
   import { onMount } from "svelte";
   import "@fontsource/marcellus-sc/400.css";
 
-  type Status = { connected: boolean; model: string | null; rows: number; columns: number; message: string };
-  type Input = { kind: "key" | "button" | "unknown"; index: number; pressed: boolean; raw_id: number };
-  type Action = { plugin: string; plugin_name: string; category: string; action: string; name: string; tooltip: string; icon: string | null; group_icon: string | null };
+  type Status = {
+    connected: boolean; model: string | null; model_id: string; model_name: string; rows: number; columns: number;
+    buttons: number; dials: number; strip: boolean; ring_leds: number; tested: boolean; message: string;
+  };
+  type Input = { kind: string; index: number; pressed: boolean; turn: number; raw_id: number };
+  type Action = { plugin: string; plugin_name: string; category: string; action: string; name: string; tooltip: string; icon: string | null; group_icon: string | null; controllers: string[] };
   type Plugin = { uuid: string; name: string; version: string; source: string; kind: string; status: string; dir: string; hidden: boolean };
   type Look = { title?: string | null; show_title?: boolean | null; align?: string | null; color?: string | null; font_size?: number | null; icon?: string | null };
   type KeyInfo = { key: number; plugin: string; plugin_name: string; action: string; name: string; settings_url: string | null; builtin: boolean; settings: Record<string, any>; look: Look };
@@ -36,7 +39,9 @@
     { name: "Tyrian purple", color: "#7a2c6e" },
     { name: "Marble", color: "#f3ecdf" },
   ];
-  const buttonNames = ["Left", "Middle", "Right"];
+  // Buttons count from 100 and knobs from 200 among a page's keys.
+  const BUTTON_BASE = 100;
+  const DIAL_BASE = 200;
   const mediaKeys = [
     { id: "play-pause", name: "Play / pause" },
     { id: "next", name: "Next track" },
@@ -47,9 +52,12 @@
   ];
 
   let page = $state<Page>("home");
-  let status = $state<Status>({ connected: false, model: null, rows: 3, columns: 5, message: "Looking for your dock..." });
+  let status = $state<Status>({
+    connected: false, model: null, model_id: "M18", model_name: "Stream Dock M18", rows: 3, columns: 5,
+    buttons: 3, dials: 0, strip: false, ring_leds: 24, tested: true, message: "Looking for your dock...",
+  });
+  // Keys, buttons and knobs held down on the dock, by their place number.
   let pressedKeys = $state(new Set<number>());
-  let pressedButtons = $state(new Set<number>());
   let previews = $state<Record<number, string>>({});
   let actions = $state<Action[]>([]);
   let plugins = $state<Plugin[]>([]);
@@ -269,7 +277,7 @@
     delay: { ms: 500 },
   };
   const stepChoices = $derived([
-    ...actions.filter((a) => a.plugin === "com.agora.builtin" && !["folder", "multi", "toggle"].includes(a.action)).map((a) => ({ id: a.action, name: a.name })),
+    ...actions.filter((a) => a.plugin === "com.agora.builtin" && !["folder", "multi", "toggle", "dial"].includes(a.action)).map((a) => ({ id: a.action, name: a.name })),
     { id: "delay", name: "Pause" },
   ]);
 
@@ -352,13 +360,26 @@
   }
 
   async function loadOverview() {
-    const list = await Promise.all(
-      Array.from({ length: keyCount }, (_, k) => invoke<KeyInfo | null>("key_info", { key: k }).catch(() => null)),
-    );
+    const slots = allSlots;
+    const list = await Promise.all(slots.map((k) => invoke<KeyInfo | null>("key_info", { key: k }).catch(() => null)));
     const next: Record<number, KeyInfo> = {};
-    list.forEach((ki, k) => ki && (next[k] = ki));
+    list.forEach((ki, i) => ki && (next[slots[i]] = ki));
     keyInfos = next;
   }
+
+  const isDial = (k: number) => k >= DIAL_BASE;
+  /// What the user calls a place: "Key 3", "Left button", "Knob 2".
+  function slotName(k: number | null) {
+    if (k === null) return "";
+    if (k >= DIAL_BASE) return `Knob ${k - DIAL_BASE + 1}`;
+    if (k >= BUTTON_BASE) {
+      const b = k - BUTTON_BASE;
+      return status.buttons === 3 ? `${["Left", "Middle", "Right"][b]} button` : `Button ${b + 1}`;
+    }
+    return `Key ${k + 1}`;
+  }
+  /// Whether an action can go on this place: knobs take knob actions only.
+  const fitsSlot = (a: Action, k: number) => (a.controllers ?? ["Keypad"]).includes(isDial(k) ? "Encoder" : "Keypad");
 
   async function place(k: number, a: Action) {
     await call("place_action", { key: k, plugin: a.plugin, action: a.action });
@@ -367,11 +388,14 @@
     refreshPlugins();
   }
 
-  /// From the overview: puts an action on the first free key.
+  /// From the overview: puts an action on the first free key (or knob,
+  /// for knob actions).
   async function placeOnFreeKey(a: Action) {
-    const free = Array.from({ length: keyCount }, (_, k) => k).find((k) => !keyInfos[k]);
+    const free = allSlots.find((k) => fitsSlot(a, k) && !keyInfos[k]);
     if (free === undefined) {
-      error = "Every key is in use. Drag the action onto a key to replace it.";
+      error = (a.controllers ?? []).includes("Keypad")
+        ? "Every key is in use. Drag the action onto a key to replace it."
+        : status.dials ? "Every knob is in use. Drag the action onto a knob to replace it." : "This dock has no knobs for that action.";
       return;
     }
     await place(free, a);
@@ -410,6 +434,8 @@
     const out = new Map<string, Action[]>();
     for (const a of actions) {
       if (q && !`${a.name} ${a.plugin_name} ${a.tooltip}`.toLowerCase().includes(q)) continue;
+      // Picking for a place: only what fits it. Knob actions only on docks with knobs.
+      if (selected !== null ? !fitsSlot(a, selected) : !status.dials && !(a.controllers ?? ["Keypad"]).includes("Keypad")) continue;
       const g = a.category || a.plugin_name;
       out.set(g, [...(out.get(g) ?? []), a]);
     }
@@ -520,18 +546,37 @@
 
   // ---- status ----
 
+  /// A different model brings different keys, buttons and knobs.
+  function setStatus(s: Status) {
+    const changed = s.model_id !== status.model_id;
+    status = s;
+    if (changed) {
+      loadKey(null);
+      loadOverview();
+      loadPreviews();
+    }
+  }
+
   async function refreshStatus() {
     const s = await invoke<Status>("dock_status").catch(() => null);
-    if (s) status = { ...s, message: s.message || status.message };
+    if (s) setStatus({ ...s, message: s.message || status.message });
   }
 
   function onInput(i: Input) {
-    if (i.kind === "unknown") return;
-    const set = i.kind === "button" ? pressedButtons : pressedKeys;
-    const next = new Set(set);
-    i.pressed ? next.add(i.index) : next.delete(i.index);
-    if (i.kind === "button") pressedButtons = next;
-    else pressedKeys = next;
+    const k = i.kind === "key" ? i.index : i.kind === "button" ? BUTTON_BASE + i.index : i.kind === "dial" || i.kind === "touch" ? DIAL_BASE + i.index : null;
+    if (k === null) return;
+    const next = new Set(pressedKeys);
+    if (i.turn) {
+      // A knob step: light it up briefly.
+      next.add(k);
+      setTimeout(() => {
+        const after = new Set(pressedKeys);
+        after.delete(k);
+        pressedKeys = after;
+      }, 150);
+    } else if (i.pressed) next.add(k);
+    else next.delete(k);
+    pressedKeys = next;
   }
 
   async function loadPreviews() {
@@ -542,6 +587,9 @@
   }
 
   const keyCount = $derived(status.rows * status.columns);
+  const buttonSlots = $derived(Array.from({ length: status.buttons }, (_, b) => BUTTON_BASE + b));
+  const dialSlots = $derived(Array.from({ length: status.dials }, (_, d) => DIAL_BASE + d));
+  const allSlots = $derived([...Array.from({ length: keyCount }, (_, k) => k), ...buttonSlots, ...dialSlots]);
   const usedKeys = $derived(Object.keys(previews).length);
   const runningPlugins = $derived(plugins.filter((p) => p.status === "running").length);
   const visiblePlugins = $derived(plugins.filter((p) => !p.hidden).length);
@@ -573,7 +621,7 @@
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
     const offs = [
-      listen<Status>("dock-status", (e) => (status = e.payload)),
+      listen<Status>("dock-status", (e) => setStatus(e.payload)),
       listen<Input>("dock-input", (e) => onInput(e.payload)),
       listen<string>("dock-error", (e) => (error = e.payload)),
       listen<Preview>("key-preview", (e) => {
@@ -608,58 +656,72 @@
   });
 </script>
 
+{#snippet slot(k: number, editable: boolean, kind: string)}
+  <button
+    class={kind}
+    class:pressed={pressedKeys.has(k)}
+    class:selected={editable && selected === k}
+    class:drop={dropTarget === k}
+    onclick={() => (editable ? clickKey(k) : openKey(k))}
+    ondblclick={() => editable && openFolder(k)}
+    draggable={editable && previews[k] ? "true" : "false"}
+    ondragstart={(e) => {
+      draggedKey = k;
+      e.dataTransfer?.setData("text/plain", `key:${k}`);
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+    }}
+    ondragend={() => {
+      draggedKey = null;
+      dropTarget = null;
+    }}
+    ondragover={(e) => {
+      if (!editable || (!dragged && draggedKey === null)) return;
+      e.preventDefault();
+      dropTarget = k;
+    }}
+    ondragleave={() => {
+      if (dropTarget === k) dropTarget = null;
+    }}
+    ondrop={(e) => {
+      e.preventDefault();
+      dropOn(k);
+    }}
+    title={editable
+      ? keyInfos[k]?.action === "folder" && keyInfos[k]?.builtin
+        ? `${slotName(k)}: double-click to open the folder`
+        : previews[k] ? `${slotName(k)}: drag to move it` : slotName(k)
+      : `Edit ${slotName(k).toLowerCase()}`}
+  >
+    {#if previews[k]}<img src={previews[k]} alt="" draggable="false" />{:else if kind === "key"}<span class="num">{k + 1}</span>
+      <svg class="palm" viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"
+        ><path d="M20 34V22" /><path
+          d="M20 22c0-8 0-14 0-18M20 22c-2-6-5-11-9-14M20 22c2-6 5-11 9-14M20 22c-5-3-9-6-14-6M20 22c5-3 9-6 14-6"
+        /><path d="M12 34c2-3 5-4 8-4s6 1 8 4" /></svg
+      >{/if}
+  </button>
+{/snippet}
+
 {#snippet keyGrid(editable: boolean)}
   <div class="grid" style="grid-template-columns: repeat({status.columns}, 1fr)">
     {#each Array(keyCount) as _, k}
-      <button
-        class="key"
-        class:pressed={pressedKeys.has(k)}
-        class:selected={editable && selected === k}
-        class:drop={dropTarget === k}
-        onclick={() => (editable ? clickKey(k) : openKey(k))}
-        ondblclick={() => editable && openFolder(k)}
-        draggable={editable && previews[k] ? "true" : "false"}
-        ondragstart={(e) => {
-          draggedKey = k;
-          e.dataTransfer?.setData("text/plain", `key:${k}`);
-          if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-        }}
-        ondragend={() => {
-          draggedKey = null;
-          dropTarget = null;
-        }}
-        ondragover={(e) => {
-          if (!editable || (!dragged && draggedKey === null)) return;
-          e.preventDefault();
-          dropTarget = k;
-        }}
-        ondragleave={() => {
-          if (dropTarget === k) dropTarget = null;
-        }}
-        ondrop={(e) => {
-          e.preventDefault();
-          dropOn(k);
-        }}
-        title={editable
-          ? keyInfos[k]?.action === "folder" && keyInfos[k]?.builtin
-            ? `Key ${k + 1}: double-click to open the folder`
-            : previews[k] ? `Key ${k + 1}: drag to move it` : `Key ${k + 1}`
-          : `Edit key ${k + 1}`}
-      >
-        {#if previews[k]}<img src={previews[k]} alt="" draggable="false" />{:else}<span class="num">{k + 1}</span>
-          <svg class="palm" viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"
-            ><path d="M20 34V22" /><path
-              d="M20 22c0-8 0-14 0-18M20 22c-2-6-5-11-9-14M20 22c2-6 5-11 9-14M20 22c-5-3-9-6-14-6M20 22c5-3 9-6 14-6"
-            /><path d="M12 34c2-3 5-4 8-4s6 1 8 4" /></svg
-          >{/if}
-      </button>
+      {@render slot(k, editable, "key")}
     {/each}
   </div>
-  <div class="buttons">
-    {#each buttonNames as name, b}
-      <div class="round" class:pressed={pressedButtons.has(b)} title="{name} button"></div>
-    {/each}
-  </div>
+  {#if buttonSlots.length}
+    <div class="buttons">
+      {#each buttonSlots as k}{@render slot(k, editable, "round")}{/each}
+    </div>
+  {/if}
+  {#if dialSlots.length}
+    <div class="dials" class:strip={status.strip} style="grid-template-columns: repeat({dialSlots.length}, 1fr)">
+      {#each dialSlots as k}
+        <div class="dial">
+          {#if status.strip}<div class="segment">{#if previews[k]}<img src={previews[k]} alt="" />{/if}</div>{/if}
+          {@render slot(k, editable, status.strip ? "knob plain" : "knob")}
+        </div>
+      {/each}
+    </div>
+  {/if}
 {/snippet}
 
 {#snippet library()}
@@ -881,6 +943,11 @@
     {:else if action === "toggle"}
       {@render stepsEditor("steps", "First press")}
       {@render stepsEditor("steps_b", "Second press")}
+    {:else if action === "dial"}
+      <p class="muted small">Each step of a turn runs the list once. Volume up and down from Media work well here.</p>
+      {@render stepsEditor("left", "Turn left")}
+      {@render stepsEditor("right", "Turn right")}
+      {@render stepsEditor("press", status.strip ? "Press or tap the screen above" : "Press")}
     {:else}
       <p class="muted">This action has no settings.</p>
     {/if}
@@ -999,7 +1066,7 @@
             <span class="swatch" style="background: {settings.ring_on ? settings.ring_color : 'var(--line)'}"></span>
             {settings.brightness}<small>%</small>
           </span>
-          <span class="card-label">Screen brightness · ring {settings.ring_on ? "on" : "off"}</span>
+          <span class="card-label">Screen brightness{status.ring_leds ? ` · ${status.ring_leds >= 24 ? "ring" : "lights"} ${settings.ring_on ? "on" : "off"}` : ""}</span>
           <span class="card-go">Dock settings</span>
         </button>
       </div>
@@ -1023,7 +1090,7 @@
             <div class="side-head">
               <div>
                 <h2>{pageName || "Your keys"}</h2>
-                <div class="muted">{Object.keys(keyInfos).length} of {keyCount} keys set up. Click a key to edit it.</div>
+                <div class="muted">{Object.keys(keyInfos).length} of {allSlots.length} {allSlots.length > keyCount ? "keys, buttons and knobs" : "keys"} set up. Click one to edit it.</div>
               </div>
             </div>
             {#if Object.keys(keyInfos).length > 0}
@@ -1031,28 +1098,28 @@
                 {#each Object.values(keyInfos) as ki (ki.key)}
                   <button class="key-row" onclick={() => loadKey(ki.key)}>
                     {#if previews[ki.key]}<img src={previews[ki.key]} alt="" />{:else}<span class="noicon"></span>{/if}
-                    <span class="key-row-text"><b><span class="k">Key {ki.key + 1}</span> · {ki.name}</b><span class="muted small">{ki.plugin_name}</span></span>
+                    <span class="key-row-text"><b><span class="k">{slotName(ki.key)}</span> · {ki.name}</b><span class="muted small">{ki.plugin_name}</span></span>
                   </button>
                 {/each}
               </div>
             {/if}
             <h2 class="lib-head">Action library</h2>
-            <p class="muted hint">Drag an action onto a key, or click it to use the first free key. Drag keys onto each other to move or swap them.</p>
+            <p class="muted hint">Drag an action onto a key{status.buttons ? " or button" : ""}{status.dials ? " or knob" : ""}, or click it to use the first free one. Drag keys onto each other to move or swap them.</p>
             {@render library()}
           {:else if picking}
             <div class="side-head">
-              <h2>Pick an action for key <span class="k">{selected + 1}</span></h2>
+              <h2>Pick an action for <span class="k">{slotName(selected).toLowerCase()}</span></h2>
               <div class="row">
                 {#if info}<button onclick={() => (picking = false)}>Cancel</button>{/if}
                 <button onclick={() => loadKey(null)}>All keys</button>
               </div>
             </div>
-            <p class="muted hint">Click an action to put it on key {(selected ?? 0) + 1}, or drag it onto any key.</p>
+            <p class="muted hint">{isDial(selected) ? "Knobs take Knob, or plugin actions made for knobs." : `Click an action to put it on ${slotName(selected).toLowerCase()}, or drag it onto any key.`}</p>
             {@render library()}
           {:else if info}
             <div class="side-head">
               <div>
-                <h2><span class="k">Key {(selected ?? 0) + 1}</span> · {info.name}</h2>
+                <h2><span class="k">{slotName(selected)}</span> · {info.name}</h2>
                 <div class="muted">{info.plugin_name}</div>
               </div>
               <div class="row">
@@ -1064,7 +1131,9 @@
             {#if info.builtin}
               {@render actionForm(info.action, info.settings, saveSettings)}
             {/if}
-            {@render lookEditor(info)}
+            {#if selected !== null && (selected < BUTTON_BASE || (isDial(selected) && status.strip))}
+              {@render lookEditor(info)}
+            {/if}
             {#if info.settings_url}
               {#key info.settings_url}
                 <iframe class="pi" src={info.settings_url} title="Settings for {info.name}"></iframe>
@@ -1128,6 +1197,7 @@
       <div class="dock-page">
         <section class="screen-card">
           <h2>Screen</h2>
+          <p class="muted small">{status.model_name}{status.connected ? "" : " (last connected)"}{status.tested ? "" : ". Agora hasn't been tried on this model yet; tell us what works and what doesn't."}</p>
           <label class="slider">
             <span>Key brightness <b>{settings.brightness}%</b></span>
             <input
@@ -1141,14 +1211,16 @@
           </label>
         </section>
 
+        {#if status.ring_leds > 0}
         <section class="ring-card">
           <div class="side-head">
-            <h2>Light ring</h2>
+            <h2>{status.ring_leds >= 24 ? "Light ring" : "Side lights"}</h2>
             <label class="switch-row tight">
               <input type="checkbox" role="switch" checked={settings.ring_on} onchange={toggleRing} />
               <span>{settings.ring_on ? "On" : "Off"}</span>
             </label>
           </div>
+          {#if status.ring_leds >= 24}
           <svg class="ring-preview" viewBox="0 0 220 152" role="img" aria-label="Light ring preview">
             <rect x="34" y="26" width="152" height="88" rx="14" fill="var(--key)" />
             {#each ringLeds as l, i}
@@ -1172,6 +1244,7 @@
             <button class:active={paint} onclick={() => { paint = true; brush = settings.ring_color; }}>Paint lights</button>
           </div>
           {#if paint}<p class="muted small">Pick a colour, then click or drag over the lights.</p>{/if}
+          {/if}
           <div class="swatches" role="group" aria-label="Ring colour">
             {#each ringSwatches as sw}
               <button
@@ -1187,10 +1260,12 @@
               <input type="color" value={paint ? brush : settings.ring_color} onchange={(e) => (paint ? (brush = e.currentTarget.value) : setRing(e.currentTarget.value))} aria-label="Pick any colour" />
             </label>
           </div>
+          {#if status.ring_leds >= 24}
           <div class="row wrap presets">
             <span class="muted small">Presets</span>
             {#each ringPresets as pr}<button class="small" onclick={() => setLights(pr.colors())}>{pr.name}</button>{/each}
           </div>
+          {/if}
           <label class="slider">
             <span>Ring brightness <b>{settings.ring_brightness}%</b></span>
             <input
@@ -1205,6 +1280,7 @@
           {#if notice}<p class="muted small">{notice}</p>{/if}
           {#if error}<p class="error">{error}</p>{/if}
         </section>
+        {/if}
 
         <section class="screen-card">
           <h2>Agora</h2>

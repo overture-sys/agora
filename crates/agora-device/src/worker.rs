@@ -6,17 +6,19 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::transport::Transport;
-use crate::{InputEvent, Layout, Result, Rgb, M18};
+use crate::{InputEvent, Layout, Model, Result, Rgb, StreamDock};
 
-/// What every model driver offers. One driver per model.
+/// What a dock driver offers. [`StreamDock`] serves every model; tests can
+/// supply their own.
 pub trait Dock: Send {
-    fn layout(&self) -> Layout;
+    fn model(&self) -> &'static Model;
     fn open(&mut self) -> Result<()>;
     fn set_brightness(&mut self, pct: u8) -> Result<()>;
     fn keepalive(&mut self) -> Result<()>;
     fn keepalive_interval(&self) -> Duration;
     fn clear_all(&mut self) -> Result<()>;
     fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()>;
+    fn set_strip_jpeg(&mut self, segment: usize, jpeg: &[u8]) -> Result<()>;
     fn set_ring(&mut self, colors: &[Rgb]) -> Result<()>;
     fn set_ring_brightness(&mut self, pct: u8) -> Result<()>;
     fn ring_off(&mut self) -> Result<()>;
@@ -25,51 +27,56 @@ pub trait Dock: Send {
     fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>>;
 }
 
-impl<T: Transport> Dock for M18<T> {
-    fn layout(&self) -> Layout {
-        M18::layout(self)
-    }
-    fn open(&mut self) -> Result<()> {
-        M18::open(self)
-    }
-    fn set_brightness(&mut self, pct: u8) -> Result<()> {
-        M18::set_brightness(self, pct)
-    }
-    fn keepalive(&mut self) -> Result<()> {
-        M18::keepalive(self)
+impl<T: Transport> Dock for StreamDock<T> {
+    fn model(&self) -> &'static Model {
+        StreamDock::model(self)
     }
     fn keepalive_interval(&self) -> Duration {
-        Duration::from_millis(crate::m18::KEEPALIVE_MS)
+        Duration::from_millis(crate::streamdock::KEEPALIVE_MS)
+    }
+    fn open(&mut self) -> Result<()> {
+        StreamDock::open(self)
+    }
+    fn set_brightness(&mut self, pct: u8) -> Result<()> {
+        StreamDock::set_brightness(self, pct)
+    }
+    fn keepalive(&mut self) -> Result<()> {
+        StreamDock::keepalive(self)
     }
     fn clear_all(&mut self) -> Result<()> {
-        M18::clear_all(self)
+        StreamDock::clear_all(self)
     }
     fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()> {
-        M18::set_key_jpeg(self, key, jpeg)
+        StreamDock::set_key_jpeg(self, key, jpeg)
+    }
+    fn set_strip_jpeg(&mut self, segment: usize, jpeg: &[u8]) -> Result<()> {
+        StreamDock::set_strip_jpeg(self, segment, jpeg)
     }
     fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> {
-        M18::set_ring(self, colors)
+        StreamDock::set_ring(self, colors)
     }
     fn set_ring_brightness(&mut self, pct: u8) -> Result<()> {
-        M18::set_ring_brightness(self, pct)
+        StreamDock::set_ring_brightness(self, pct)
     }
     fn ring_off(&mut self) -> Result<()> {
-        M18::ring_off(self)
+        StreamDock::ring_off(self)
     }
     fn ring_reset(&mut self) -> Result<()> {
-        M18::ring_reset(self)
+        StreamDock::ring_reset(self)
     }
     fn close(&mut self) -> Result<()> {
-        M18::close(self)
+        StreamDock::close(self)
     }
     fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>> {
-        M18::read_event(self, timeout_ms)
+        StreamDock::read_event(self, timeout_ms)
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Command {
     SetKeyJpeg(usize, Vec<u8>),
+    /// A picture for one segment of the touch strip.
+    SetStripJpeg(usize, Vec<u8>),
     Brightness(u8),
     Ring(Vec<Rgb>),
     /// Ring brightness, 0 to 100.
@@ -95,6 +102,7 @@ pub struct DockWorker {
     tx: Sender<Command>,
     handle: Option<JoinHandle<()>>,
     pub layout: Layout,
+    pub model: &'static Model,
 }
 
 impl DockWorker {
@@ -102,7 +110,8 @@ impl DockWorker {
     /// receiver until [`Event::Stopped`].
     pub fn start<D: Dock + 'static>(mut dock: D) -> Result<(Self, Receiver<Event>)> {
         dock.open()?;
-        let layout = dock.layout();
+        let model = dock.model();
+        let layout = Layout::of(model);
         let (tx, rx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
         let handle = std::thread::Builder::new()
@@ -114,6 +123,7 @@ impl DockWorker {
                 tx,
                 handle: Some(handle),
                 layout,
+                model,
             },
             erx,
         ))
@@ -155,6 +165,7 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
             };
             let result = match cmd {
                 Command::SetKeyJpeg(k, jpeg) => dock.set_key_jpeg(k, &jpeg),
+                Command::SetStripJpeg(s, jpeg) => dock.set_strip_jpeg(s, &jpeg),
                 Command::Brightness(p) => dock.set_brightness(p),
                 Command::Ring(c) => {
                     ring_used = true;
@@ -213,7 +224,7 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
 mod tests {
     use super::*;
     use crate::transport::FakeTransport;
-    use crate::{Control, M18};
+    use crate::{models, Control, StreamDock};
 
     #[test]
     fn worker_reports_presses_and_closes_on_drop() {
@@ -221,7 +232,7 @@ mod tests {
         let mut r = b"ACK\0\0OK\0\0".to_vec();
         r.extend_from_slice(&[0x03, 1]);
         fake.to_read.push_back(r);
-        let (worker, events) = DockWorker::start(M18::new(fake)).unwrap();
+        let (worker, events) = DockWorker::start(StreamDock::new(&models::M18, fake)).unwrap();
         match events.recv_timeout(Duration::from_secs(2)).unwrap() {
             Event::Input(ev) => assert_eq!(ev.control, Control::Key(2)),
             other => panic!("unexpected {other:?}"),

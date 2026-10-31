@@ -18,12 +18,51 @@ use crate::vsd_import;
 use crate::{server, Config};
 
 /// The dock as plugins see it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DeviceDesc {
     pub id: String,
     pub name: String,
     pub rows: usize,
     pub columns: usize,
+    /// Buttons without a screen (the M18's round buttons).
+    pub buttons: usize,
+    /// Knobs (the N3 and N4).
+    pub dials: usize,
+}
+
+/// Where buttons and knobs sit among a page's keys: screen keys count from
+/// 0, buttons from 100 and knobs from 200, so a layout keeps its meaning
+/// whatever size of dock it is shown on.
+pub const BUTTON_BASE: usize = 100;
+pub const DIAL_BASE: usize = 200;
+
+/// What a knob did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialInput {
+    /// Turned some steps: below zero to the left.
+    Turn(i32),
+    Press,
+    Release,
+    /// A tap on the knob's strip screen (the N4).
+    Tap,
+}
+
+/// The kind of place a key number is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Key,
+    Button,
+    Dial,
+}
+
+fn slot(key: usize) -> Slot {
+    if key >= DIAL_BASE {
+        Slot::Dial
+    } else if key >= BUTTON_BASE {
+        Slot::Button
+    } else {
+        Slot::Key
+    }
 }
 
 /// Things the app should do or show.
@@ -76,6 +115,8 @@ pub struct ActionInfo {
     pub icon: Option<String>,
     /// The plugin's (category's) icon for its group in the list.
     pub group_icon: Option<String>,
+    /// Where it can go: "Keypad" (keys and buttons), "Encoder" (knobs).
+    pub controllers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -494,7 +535,10 @@ pub(crate) enum Msg {
     SetHidden(String, bool),
     Forget(String, oneshot::Sender<Option<PathBuf>>),
     Key(usize, bool),
+    Dial(usize, DialInput),
+    Swipe(i32),
     DeviceConnected(bool),
+    Device(DeviceDesc),
     Actions(oneshot::Sender<Vec<ActionInfo>>),
     Plugins(oneshot::Sender<Vec<PluginInfo>>),
     KeyInfo(usize, oneshot::Sender<Option<KeyInfo>>),
@@ -611,8 +655,24 @@ impl HostHandle {
         let _ = self.tx.send(Msg::Key(key, pressed));
     }
 
+    /// A knob, counted from 0 on the left.
+    pub fn dial(&self, dial: usize, input: DialInput) {
+        let _ = self.tx.send(Msg::Dial(dial, input));
+    }
+
+    /// A swipe along the touch strip: next page to the left, previous to
+    /// the right, like turning pages.
+    pub fn swipe(&self, direction: i32) {
+        let _ = self.tx.send(Msg::Swipe(direction));
+    }
+
     pub fn device_connected(&self, connected: bool) {
         let _ = self.tx.send(Msg::DeviceConnected(connected));
+    }
+
+    /// A different model was plugged in.
+    pub fn set_device(&self, device: DeviceDesc) {
+        let _ = self.tx.send(Msg::Device(device));
     }
 
     /// Asks the host to send every key's face again (e.g. after a reconnect).
@@ -852,7 +912,31 @@ impl State {
                 let _ = done.send(self.plugins.remove(&uuid).map(|p| p.dir));
             }
             Msg::Key(key, pressed) => self.on_key(key, pressed),
+            Msg::Dial(dial, input) => self.on_dial(dial, input),
+            Msg::Swipe(direction) => {
+                let action = if direction < 0 {
+                    builtin::NEXT_PAGE
+                } else {
+                    builtin::PREVIOUS_PAGE
+                };
+                self.run_builtin(&Instance::new(BUILTIN, action, json!({})));
+            }
             Msg::DeviceConnected(c) => self.on_device(c),
+            Msg::Device(d) => {
+                if d != self.config.device {
+                    let connected = self.device_connected;
+                    if connected {
+                        self.on_device(false);
+                    }
+                    self.leave_page();
+                    self.config.device = d;
+                    self.shown.clear();
+                    self.enter_page();
+                    if connected {
+                        self.on_device(true);
+                    }
+                }
+            }
             Msg::Actions(done) => {
                 let _ = done.send(self.action_list());
             }
@@ -936,7 +1020,42 @@ impl State {
 
     fn coords(&self, key: usize) -> Value {
         let cols = self.config.device.columns.max(1);
-        json!({ "column": key % cols, "row": key / cols })
+        match slot(key) {
+            Slot::Key => json!({ "column": key % cols, "row": key / cols }),
+            // Under the screen keys.
+            Slot::Button => json!({ "column": key - BUTTON_BASE, "row": self.config.device.rows }),
+            // Knobs number from the left in a row of their own, as on Elgato's.
+            Slot::Dial => json!({ "column": key - DIAL_BASE, "row": 0 }),
+        }
+    }
+
+    /// Whether this dock has the key, button or knob.
+    fn slot_exists(&self, key: usize) -> bool {
+        let d = &self.config.device;
+        match slot(key) {
+            Slot::Key => key < d.rows * d.columns,
+            Slot::Button => key - BUTTON_BASE < d.buttons,
+            Slot::Dial => key - DIAL_BASE < d.dials,
+        }
+    }
+
+    /// The controller name plugins expect for a place: knobs are "Encoder"
+    /// to Elgato plugins and "Knob" to Stream Dock ones.
+    fn controller(&self, key: usize) -> &'static str {
+        if slot(key) != Slot::Dial {
+            return "Keypad";
+        }
+        let knob = self.layout.keys().get(&key).is_some_and(|i| {
+            self.plugins
+                .get(&i.plugin)
+                .and_then(|p| p.action(&i.action))
+                .is_some_and(|a| a.controllers.iter().any(|c| c == "Knob"))
+        });
+        if knob {
+            "Knob"
+        } else {
+            "Encoder"
+        }
     }
 
     fn key_of(&self, context: &str) -> Option<usize> {
@@ -952,6 +1071,7 @@ impl State {
         let mut payload = json!({
             "settings": inst.settings,
             "coordinates": self.coords(key),
+            "controller": self.controller(key),
             "state": inst.state,
             "isInMultiAction": false,
         });
@@ -1236,9 +1356,37 @@ impl State {
         self.config.device.rows * self.config.device.columns
     }
 
+    /// Whether an action can go on keys and buttons ("Keypad") or knobs
+    /// ("Encoder").
+    fn fits(&self, plugin: &str, action: &str, controller: &str) -> bool {
+        if plugin == BUILTIN {
+            return (action == builtin::DIAL) == (controller == "Encoder");
+        }
+        let Some(a) = self.plugins.get(plugin).and_then(|p| p.action(action)) else {
+            return false;
+        };
+        match controller {
+            "Encoder" => a.controllers.iter().any(|c| c == "Encoder" || c == "Knob"),
+            _ => a.controllers.is_empty() || a.controllers.iter().any(|c| c == "Keypad"),
+        }
+    }
+
     fn place(&mut self, key: usize, plugin: &str, action: &str) -> Result<(), String> {
-        if key >= self.key_count() {
+        if !self.slot_exists(key) {
             return Err(format!("no key {key}"));
+        }
+        let controller = if slot(key) == Slot::Dial {
+            "Encoder"
+        } else {
+            "Keypad"
+        };
+        if !self.fits(plugin, action, controller) {
+            return Err(if controller == "Encoder" {
+                "That action can't go on a knob. Use Knob, or a plugin action made for knobs."
+                    .into()
+            } else {
+                "That action is made for knobs.".into()
+            });
         }
         if plugin == BUILTIN {
             let def =
@@ -1285,7 +1433,7 @@ impl State {
         if !self.layout.keys().contains_key(&key) {
             return;
         }
-        self.send_instance(key, "willDisappear", json!({ "controller": "Keypad" }));
+        self.send_instance(key, "willDisappear", json!({}));
         let inst = self.layout.keys_mut().remove(&key).expect("checked");
         self.dirty = true;
         self.show(key, Face::default());
@@ -1345,8 +1493,14 @@ impl State {
     }
 
     fn move_key(&mut self, from: usize, to: usize) {
-        let count = self.key_count();
-        if from == to || from >= count || to >= count || !self.layout.keys().contains_key(&from) {
+        // Keys and buttons swap freely; knobs only with knobs.
+        let same_kind = (slot(from) == Slot::Dial) == (slot(to) == Slot::Dial);
+        if from == to
+            || !same_kind
+            || !self.slot_exists(from)
+            || !self.slot_exists(to)
+            || !self.layout.keys().contains_key(&from)
+        {
             return;
         }
         // Plugins see the action leave its old spot and appear at the new one;
@@ -1356,7 +1510,7 @@ impl State {
             .filter(|k| self.layout.keys().contains_key(k))
             .collect();
         for &k in &moved {
-            self.send_instance(k, "willDisappear", json!({ "controller": "Keypad" }));
+            self.send_instance(k, "willDisappear", json!({}));
         }
         let a = self.layout.keys_mut().remove(&from);
         let b = self.layout.keys_mut().remove(&to);
@@ -1381,7 +1535,7 @@ impl State {
     }
 
     fn appear(&mut self, key: usize) {
-        self.send_instance(key, "willAppear", json!({ "controller": "Keypad" }));
+        self.send_instance(key, "willAppear", json!({}));
         self.send_title_params(key);
     }
 
@@ -1427,6 +1581,62 @@ impl State {
             self.run_builtin(&inst);
         } else {
             self.send_instance(key, "keyDown", json!({}));
+        }
+    }
+
+    fn on_dial(&mut self, dial: usize, input: DialInput) {
+        let key = DIAL_BASE + dial;
+        let Some(inst) = self.layout.keys().get(&key).cloned() else {
+            self.down.remove(&key);
+            return;
+        };
+        if inst.is_builtin(builtin::DIAL) {
+            let (field, times) = match input {
+                DialInput::Turn(t) if t < 0 => ("left", t.unsigned_abs()),
+                DialInput::Turn(t) => ("right", t.unsigned_abs()),
+                DialInput::Press | DialInput::Tap => ("press", 1),
+                DialInput::Release => return,
+            };
+            let steps: Vec<Value> = inst
+                .settings
+                .get(field)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            // A fast spin can report several steps at once; ten is plenty.
+            for _ in 0..times.min(10) {
+                self.run_steps(steps.clone());
+            }
+            return;
+        }
+        if inst.plugin == BUILTIN {
+            return;
+        }
+        match input {
+            DialInput::Turn(ticks) => {
+                let pressed = self.down.contains_key(&key);
+                self.send_instance(
+                    key,
+                    "dialRotate",
+                    json!({ "ticks": ticks, "pressed": pressed }),
+                );
+            }
+            DialInput::Press => {
+                self.down.insert(key, inst.context.clone());
+                self.send_instance(key, "dialDown", json!({}));
+            }
+            DialInput::Release => {
+                if self.down.remove(&key).as_deref() == Some(inst.context.as_str()) {
+                    self.send_instance(key, "dialUp", json!({}));
+                }
+            }
+            DialInput::Tap => {
+                self.send_instance(
+                    key,
+                    "touchTap",
+                    json!({ "tapPos": [100, 50], "hold": false }),
+                );
+            }
         }
     }
 
@@ -1552,14 +1762,19 @@ impl State {
     fn leave_page(&mut self) {
         let keys: Vec<usize> = self.layout.keys().keys().copied().collect();
         for k in keys {
-            self.send_instance(k, "willDisappear", json!({ "controller": "Keypad" }));
+            self.send_instance(k, "willDisappear", json!({}));
         }
         self.down.clear();
     }
 
     /// Draws every key of the page now showing and tells plugins.
     fn enter_page(&mut self) {
-        for k in 0..self.key_count() {
+        let d = &self.config.device;
+        let slots: Vec<usize> = (0..self.key_count())
+            .chain(BUTTON_BASE..BUTTON_BASE + d.buttons)
+            .chain(DIAL_BASE..DIAL_BASE + d.dials)
+            .collect();
+        for k in slots {
             self.redraw(k);
         }
         let keys: Vec<(usize, String)> = self
@@ -1599,11 +1814,12 @@ impl State {
                 .find(|p| p.action(action).is_some())
                 .map(|p| p.uuid.clone())
         };
-        let (cols, rows) = (self.config.device.columns, self.config.device.rows);
+        let dev = &self.config.device;
+        let (cols, rows, buttons) = (dev.columns, dev.rows, dev.buttons);
         let mut read = Vec::new();
         let mut skipped = Vec::new();
         for d in dirs {
-            let (p, s) = vsd_import::read(d, cols, rows, &known)?;
+            let (p, s) = vsd_import::read(d, cols, rows, buttons, &known)?;
             skipped.extend(s);
             read.push(p);
         }
@@ -1910,6 +2126,11 @@ impl State {
                 tooltip: d.tooltip.into(),
                 icon: builtin::list_icon(d.id),
                 group_icon: builtin::group_icon(d.group),
+                controllers: vec![if d.id == builtin::DIAL {
+                    "Encoder".into()
+                } else {
+                    "Keypad".into()
+                }],
             })
             .collect();
         let plugins: Vec<Plugin> = self.plugins.values().cloned().collect();
@@ -1927,9 +2148,14 @@ impl State {
                 .iter()
                 .filter(|a| a.visible_in_actions_list)
             {
-                let keypad =
-                    a.controllers.is_empty() || a.controllers.iter().any(|c| c == "Keypad");
-                if !keypad {
+                let mut controllers = Vec::new();
+                if a.controllers.is_empty() || a.controllers.iter().any(|c| c == "Keypad") {
+                    controllers.push("Keypad".to_string());
+                }
+                if a.controllers.iter().any(|c| c == "Encoder" || c == "Knob") {
+                    controllers.push("Encoder".to_string());
+                }
+                if controllers.is_empty() {
                     continue;
                 }
                 out.push(ActionInfo {
@@ -1945,6 +2171,7 @@ impl State {
                     tooltip: a.tooltip.clone(),
                     icon: self.manifest_image(&p.uuid, &a.icon),
                     group_icon: group_icon.clone(),
+                    controllers,
                 });
             }
         }
@@ -2002,7 +2229,7 @@ impl State {
                 "action": inst.action,
                 "context": inst.context,
                 "device": self.config.device.id,
-                "payload": { "settings": inst.settings, "coordinates": self.coords(key), "controller": "Keypad", "state": inst.state },
+                "payload": { "settings": inst.settings, "coordinates": self.coords(key), "controller": self.controller(key), "state": inst.state },
             })
             .to_string();
             server::connect_url(
@@ -2229,6 +2456,37 @@ impl State {
             ("logMessage", _) => {
                 let m = payload.get("message").and_then(Value::as_str).unwrap_or("");
                 self.log(uuid, m.chars().take(2000).collect::<String>());
+            }
+            // Knob screens (Elgato's Stream Deck+): show the title or value
+            // and the icon the plugin sends, as a face.
+            ("setFeedback", Some(k)) => {
+                let text = ["value", "title"]
+                    .iter()
+                    .find_map(|f| match payload.get(*f) {
+                        Some(Value::String(t)) => Some(t.clone()),
+                        Some(Value::Number(n)) => Some(n.to_string()),
+                        Some(Value::Object(o)) => o.get("value").map(|v| match v {
+                            Value::String(t) => t.clone(),
+                            other => other.to_string(),
+                        }),
+                        _ => None,
+                    });
+                let icon = match payload.get("icon") {
+                    Some(Value::String(i)) => Some(i.clone()),
+                    Some(Value::Object(o)) => {
+                        o.get("value").and_then(Value::as_str).map(str::to_string)
+                    }
+                    _ => None,
+                };
+                self.per_state(k, &json!({}), |inst, s| {
+                    if let Some(t) = &text {
+                        inst.titles.insert(s, t.clone());
+                    }
+                    if let Some(i) = &icon {
+                        inst.images.insert(s, i.clone());
+                    }
+                });
+                self.redraw(k);
             }
             // Elgato-only extras: accepted quietly so plugins that use them keep working.
             (

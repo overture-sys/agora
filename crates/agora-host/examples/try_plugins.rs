@@ -25,6 +25,8 @@ fn main() {
             name: "Stream Dock M18".into(),
             rows: 3,
             columns: 5,
+            buttons: 3,
+            dials: 0,
         },
     };
     let host = HostHandle::start(config, tx).unwrap();

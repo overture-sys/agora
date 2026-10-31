@@ -19,8 +19,8 @@ pub mod vsd_import;
 
 pub use face::{Face, Overlay};
 pub use host::{
-    ActionInfo, DeviceDesc, HostEvent, HostHandle, ImportReport, KeyInfo, LayoutOp, LayoutView,
-    Look, NameId, PluginInfo,
+    ActionInfo, DeviceDesc, DialInput, HostEvent, HostHandle, ImportReport, KeyInfo, LayoutOp,
+    LayoutView, Look, NameId, PluginInfo, BUTTON_BASE, DIAL_BASE,
 };
 pub use manifest::{Plugin, Source};
 

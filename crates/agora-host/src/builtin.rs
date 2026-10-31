@@ -31,6 +31,9 @@ pub const MULTI: &str = "multi";
 pub const TOGGLE: &str = "toggle";
 /// A pause between multi-action steps; only inside multi-actions.
 pub const DELAY: &str = "delay";
+/// A knob: actions for turning left, turning right and pressing. Only on
+/// knobs.
+pub const DIAL: &str = "dial";
 
 const STROKE: &str = r##"fill="none" stroke="#e9dcc4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round""##;
 
@@ -170,12 +173,21 @@ pub static DEFS: &[Def] = &[
         settings: || json!({ "steps": [], "steps_b": [] }),
         navigation: false,
     },
+    Def {
+        id: DIAL,
+        name: "Knob",
+        group: "Knob",
+        tooltip: "Runs actions when the knob turns left, turns right or is pressed",
+        icon: r##"<circle cx="36" cy="36" r="15" S/><path d="M36 36 v-9 M13 45 a24 24 0 0 1 0 -18 M59 27 a24 24 0 0 1 0 18" S/>"##,
+        settings: || json!({ "left": [], "right": [], "press": [] }),
+        navigation: false,
+    },
 ];
 
-/// Steps a multi-action may hold: Agora's own actions except folders and
-/// other multi-actions, plus pauses.
+/// Steps a multi-action (or knob) may hold: Agora's own actions except
+/// folders, multi-actions and knobs, plus pauses.
 pub fn step_allowed(id: &str) -> bool {
-    id == DELAY || (def(id).is_some() && !matches!(id, FOLDER | MULTI | TOGGLE))
+    id == DELAY || (def(id).is_some() && !matches!(id, FOLDER | MULTI | TOGGLE | DIAL))
 }
 
 pub fn def(id: &str) -> Option<&'static Def> {
@@ -226,6 +238,7 @@ pub fn group_icon(group: &str) -> Option<String> {
     list_icon(match group {
         "Navigation" => FOLDER,
         "Multi-action" => MULTI,
+        "Knob" => DIAL,
         _ => "open",
     })
 }

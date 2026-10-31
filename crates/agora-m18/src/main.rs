@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use agora_device::keyimage::{self, Orientation};
 use agora_device::worker::{Command, DockWorker, Event};
-use agora_device::{discover, Control, Rgb};
+use agora_device::{discover, Action, Control, Rgb};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -71,7 +71,7 @@ fn list(args: &[String]) -> R<()> {
         println!("No M18 found (5548:1000, usage page 0xFFA0).");
     }
     for f in &found {
-        println!("{}  {:?}  serial {:?}", f.model, f.product, f.serial);
+        println!("{}  {:?}  serial {:?}", f.model.name, f.product, f.serial);
     }
     if flag(args, "--all") {
         println!("\nVendor HID devices:");
@@ -88,8 +88,8 @@ fn connect() -> R<(DockWorker, Receiver<Event>)> {
     let first = found.first().ok_or(
         "No M18 found. Is it plugged in? Run `agora-m18 list --all` and send the output back.",
     )?;
-    println!("Opening {} {:?}", first.model, first.product);
-    let dock = discover::open_m18(&api, first).map_err(|e| e.to_string())?;
+    println!("Opening {} {:?}", first.model.name, first.product);
+    let dock = discover::open(&api, first).map_err(|e| e.to_string())?;
     DockWorker::start(dock).map_err(|e| e.to_string())
 }
 
@@ -149,10 +149,15 @@ fn test(args: &[String]) -> R<()> {
                 println!(
                     "  0x{:02x}  {}  {}",
                     ev.raw_id,
-                    if ev.pressed { "DOWN" } else { "up  " },
+                    match ev.action {
+                        Action::Press => "DOWN".to_string(),
+                        Action::Release => "up  ".to_string(),
+                        Action::Turn(t) => format!("turn {t:+}"),
+                        Action::Swipe(s) => format!("swipe {s:+}"),
+                    },
                     name(ev.control)
                 );
-                if ev.pressed {
+                if ev.action == Action::Press {
                     presses += 1;
                 }
             }
@@ -264,7 +269,7 @@ fn wait_for_button(events: &Receiver<Event>, timeout: Duration) -> R<u8> {
     let end = Instant::now() + timeout;
     while Instant::now() < end {
         match events.recv_timeout(Duration::from_millis(200)) {
-            Ok(Event::Input(ev)) if ev.pressed => match ev.control {
+            Ok(Event::Input(ev)) if ev.action == Action::Press => match ev.control {
                 Control::Key(k) => {
                     println!("  (that was screen key {}, press a round button)", k + 1)
                 }
@@ -280,8 +285,13 @@ fn wait_for_button(events: &Receiver<Event>, timeout: Duration) -> R<u8> {
 
 fn name(c: Control) -> String {
     match c {
-        Control::Key(k) => format!("key {} (row {}, col {})", k + 1, k / 5 + 1, k % 5 + 1),
-        Control::Button(b) => format!("{b:?} button").to_lowercase(),
+        Control::Key(k) => format!("key {}", k + 1),
+        Control::Button(b) => ["left button", "middle button", "right button"]
+            .get(b)
+            .map_or(format!("button {}", b + 1), |n| n.to_string()),
+        Control::Dial(d) => format!("knob {}", d + 1),
+        Control::Touch(t) => format!("touch strip segment {}", t + 1),
+        Control::Strip => "touch strip".into(),
         Control::Unknown(id) => format!("unknown control 0x{id:02x}"),
     }
 }

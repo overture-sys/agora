@@ -16,6 +16,12 @@ ws.onmessage = (e) => {
     send({ event: 'setTitle', context: m.context, payload: { title: 'n=' + count } });
     send({ event: 'showOk', context: m.context });
     send({ event: 'setGlobalSettings', context: args.pluginUUID, payload: { pressed: true } });
+  } else if (m.event === 'dialRotate') {
+    send({ event: 'setTitle', context: m.context, payload: { title: m.payload.controller + ' ' + m.payload.ticks + (m.payload.pressed ? ' held' : '') } });
+  } else if (m.event === 'dialDown') {
+    send({ event: 'setTitle', context: m.context, payload: { title: 'down' } });
+  } else if (m.event === 'touchTap') {
+    send({ event: 'setFeedback', context: m.context, payload: { value: 'tap' } });
   } else if (m.event === 'sendToPlugin') {
     send({ action: m.action, event: 'sendToPropertyInspector', context: m.context, payload: { echo: m.payload } });
   }

@@ -9,7 +9,8 @@ pub use image::DynamicImage;
 use crate::{glyphs, Error, Result};
 
 /// How a model's screen is turned relative to the picture we send.
-/// The M18 shows images upright (checked with `agora-m18 orient`, 2026-10-30).
+/// The M18 shows images upright (checked with `agora-m18 orient`, 2026-10-30);
+/// other models carry their own in [`crate::models`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Orientation {
     #[default]
@@ -61,13 +62,46 @@ impl Orientation {
 /// Scales `img` to fill a `size` x `size` square (cropping the long side),
 /// turns it for the device, and encodes it as JPEG.
 pub fn to_key_jpeg(img: &DynamicImage, size: u32, orientation: Orientation) -> Result<Vec<u8>> {
-    let square = img.resize_to_fill(size, size, FilterType::Lanczos3);
-    let turned = orientation.apply(square).to_rgb8();
-    let mut out = Vec::new();
-    JpegEncoder::new_with_quality(&mut out, 90)
-        .encode_image(&turned)
-        .map_err(|e| Error::Image(e.to_string()))?;
-    Ok(out)
+    to_jpeg(img, size, size, orientation)
+}
+
+/// Scales `img` to fill `width` x `height` (cropping what sticks out),
+/// turns it for the device, and encodes it as JPEG of at most
+/// [`crate::streamdock::MAX_IMAGE`] bytes, lowering the quality if needed.
+pub fn to_jpeg(
+    img: &DynamicImage,
+    width: u32,
+    height: u32,
+    orientation: Orientation,
+) -> Result<Vec<u8>> {
+    let filled = img.resize_to_fill(width, height, FilterType::Lanczos3);
+    let turned = orientation.apply(filled).to_rgb8();
+    let mut quality = 90;
+    loop {
+        let mut out = Vec::new();
+        JpegEncoder::new_with_quality(&mut out, quality)
+            .encode_image(&turned)
+            .map_err(|e| Error::Image(e.to_string()))?;
+        if out.len() <= crate::streamdock::MAX_IMAGE || quality <= 30 {
+            return Ok(out);
+        }
+        quality -= 15;
+    }
+}
+
+/// Centres a square face on a black `width` x `height` canvas, scaled to
+/// the short side, for screens that aren't square (the N4's strip).
+pub fn letterbox(img: &DynamicImage, width: u32, height: u32) -> DynamicImage {
+    let side = width.min(height);
+    let face = img.resize(side, side, FilterType::Lanczos3).to_rgba8();
+    let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    image::imageops::overlay(
+        &mut canvas,
+        &face,
+        ((width - face.width()) / 2) as i64,
+        ((height - face.height()) / 2) as i64,
+    );
+    DynamicImage::ImageRgba8(canvas)
 }
 
 /// Loads a PNG or JPEG file.

@@ -10,6 +10,8 @@
   "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
   "Actions": [
     { "UUID": "com.agora.testplugin.counter", "Name": "Counter", "Icon": "icon",
-      "States": [{ "Image": "icon", "TitleAlignment": "middle", "FontSize": "14" }] }
+      "States": [{ "Image": "icon", "TitleAlignment": "middle", "FontSize": "14" }] },
+    { "UUID": "com.agora.testplugin.volume", "Name": "Volume", "Icon": "icon",
+      "Controllers": ["Encoder"], "States": [{ "Image": "icon" }] }
   ]
 }

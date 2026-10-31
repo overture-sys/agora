@@ -129,8 +129,23 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
 .key.drop { border-color: var(--blue); border-style: dashed; transform: scale(1.04); }
 .key:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .buttons { display: flex; gap: 40px; }
-.round { width: 34px; height: 34px; border-radius: 50%; background: var(--key); border: 2px solid color-mix(in srgb, var(--pressed) 50%, transparent); box-shadow: inset 0 2px 4px rgba(0,0,0,.5); }
-.round.pressed { border-color: var(--pressed); background: color-mix(in srgb, var(--pressed) 40%, var(--key)); }
+/* Buttons and knobs: places for actions too, but with no screen of their own. */
+.round, .knob {
+  width: 38px; height: 38px; border-radius: 50%; background: var(--key); padding: 0; cursor: pointer; overflow: hidden;
+  border: 2px solid color-mix(in srgb, var(--pressed) 50%, transparent); box-shadow: inset 0 2px 4px rgba(0,0,0,.5);
+  display: flex; align-items: center; justify-content: center; transition: transform 60ms;
+}
+.round img, .knob img { width: 70%; height: 70%; opacity: .55; border-radius: 50%; }
+.knob { width: 56px; height: 56px; background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--key-text) 18%, var(--key)), var(--key) 70%); }
+.knob.plain img { display: none; }
+.round.pressed, .knob.pressed { border-color: var(--pressed); background: color-mix(in srgb, var(--pressed) 40%, var(--key)); transform: scale(.94); }
+.round.selected, .knob.selected { border-color: var(--pressed); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pressed) 30%, transparent); }
+.round.drop, .knob.drop { border-color: var(--blue); border-style: dashed; }
+.dials { display: grid; gap: 10px; width: 100%; max-width: 480px; justify-items: center; }
+.dial { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; }
+/* The N4's strip: one wide screen per knob. */
+.segment { width: 100%; aspect-ratio: 176 / 124; border-radius: 6px; background: var(--key); overflow: hidden; display: flex; justify-content: center; box-shadow: inset 0 2px 6px rgba(0,0,0,.55); }
+.segment img { height: 100%; }
 
 
 /* Dock */

@@ -1,4 +1,6 @@
-//! Driver for the VSDinside / Mirabox Stream Dock M18.
+//! One driver for every Stream Dock model. The commands are the same on all
+//! of them; what differs (key ids, picture sizes, knobs) lives in
+//! [`crate::models`].
 //!
 //! Confirmed on Devin's M18 (2026-10-29):
 //! - USB 5548:1000, vendor interface on usage page 0xFFA0.
@@ -6,86 +8,69 @@
 //! - Every command starts with `CRT\0\0`.
 //! - Start: DIS, CONNECT, CLE 0xff, STP. Re-send LIG every 8 s or the dock
 //!   falls back to its stock screen.
-//! - Key image: 64x64 JPEG, sent as BAT + raw 1024-byte pages + STP. Sent
-//!   upright (no rotation), confirmed 2026-10-30.
+//! - Key image: JPEG, sent as BAT + raw pages + STP. Sent upright on the
+//!   M18 (no rotation), confirmed 2026-10-30.
 //! - Image ids count from the bottom row; event ids count from the top row.
 //! - Light ring: SETLB with 24 RGB triples, LBLIG for its brightness. A
 //!   brightness write re-renders the strip and wipes a SETLB sent just
 //!   before it lands, so colour always goes first and brightness is only
 //!   sent when it changes (bidoofgoo/streamdock-m18 PROTOCOL.md section 8).
 //! - Close: CLE 00 44 43, then HAN. DELED resets the ring.
+//!
+//! Other models (from Companion's MIT driver): pictures of at most 10 KB,
+//! CONNECT as the keepalive, knobs report a turn as one id per direction,
+//! and some controls report only a press.
 
+use std::collections::VecDeque;
+
+use crate::models::{Model, Screen};
 use crate::transport::Transport;
-use crate::{Button, Control, Error, InputEvent, Layout, Result, Rgb};
+use crate::{Action, Control, Error, InputEvent, Layout, Result, Rgb};
 
-pub const VID: u16 = 0x5548;
-pub const PID: u16 = 0x1000;
-pub const USAGE_PAGE: u16 = 0xFFA0;
-pub const OUT_LEN: usize = 1024;
 pub const IN_LEN: usize = 512;
 pub const KEEPALIVE_MS: u64 = 8000;
+/// The largest picture the docks take.
+pub const MAX_IMAGE: usize = 10 * 1024;
 
 const PREFIX: &[u8] = b"CRT\0\0";
 
-pub const LAYOUT: Layout = Layout {
-    rows: 3,
-    columns: 5,
-    key_size: 64,
-    buttons: 3,
-    ring_leds: 24,
-};
-
-/// Which raw ids belong to the round buttons.
-///
-/// Confirmed one button at a time on Devin's M18 with `agora-m18 buttons`
-/// (2026-10-30): left 0x25, middle 0x30, right 0x31, as in the public notes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ButtonMap {
-    pub left: u8,
-    pub middle: u8,
-    pub right: u8,
-}
-
-impl Default for ButtonMap {
-    fn default() -> Self {
-        Self {
-            left: 0x25,
-            middle: 0x30,
-            right: 0x31,
-        }
-    }
-}
-
-pub struct M18<T: Transport> {
+pub struct StreamDock<T: Transport> {
     t: T,
-    pub buttons: ButtonMap,
+    model: &'static Model,
     brightness: u8,
-    /// Last SETLB frame (24 RGB triples), re-sent with the keepalive.
+    /// Last SETLB frame (RGB triples), re-sent with the keepalive.
     ring_frame: Option<Vec<u8>>,
     /// Last LBLIG sent; `None` until the ring is first used.
     ring_brightness: Option<u8>,
+    /// Releases owed for controls that only report a press.
+    pending: VecDeque<InputEvent>,
 }
 
-impl<T: Transport> M18<T> {
-    pub fn new(t: T) -> Self {
+impl<T: Transport> StreamDock<T> {
+    pub fn new(model: &'static Model, t: T) -> Self {
         Self {
             t,
-            buttons: ButtonMap::default(),
+            model,
             brightness: 80,
             ring_frame: None,
             ring_brightness: None,
+            pending: VecDeque::new(),
         }
     }
 
+    pub fn model(&self) -> &'static Model {
+        self.model
+    }
+
     pub fn layout(&self) -> Layout {
-        LAYOUT
+        Layout::of(self.model)
     }
 
     fn raw(&mut self, payload: &[u8]) -> Result<()> {
-        if payload.len() > OUT_LEN {
+        if payload.len() > self.model.packet {
             return Err(Error::TooLong {
                 len: payload.len(),
-                max: OUT_LEN,
+                max: self.model.packet,
             });
         }
         self.t.write(payload)
@@ -122,8 +107,12 @@ impl<T: Transport> M18<T> {
 
     /// Re-sends the ring colours and the screen brightness so the dock
     /// stays on our screen. Never re-sends the ring brightness: that would
-    /// wipe the colours.
+    /// wipe the colours. Models we haven't tried also get CONNECT, the
+    /// heartbeat Companion sends them.
     pub fn keepalive(&mut self) -> Result<()> {
+        if !self.model.tested {
+            self.cmd(b"CONNECT")?;
+        }
         if let Some(frame) = self.ring_frame.clone() {
             self.send_ring_frame(&frame)?;
         }
@@ -135,17 +124,32 @@ impl<T: Transport> M18<T> {
         self.cmd(b"STP")
     }
 
-    /// Puts a ready 64x64 JPEG on a key. `key` counts from 0 at the top
-    /// left, row by row. Use [`crate::keyimage`] to make the JPEG.
+    /// Puts a ready JPEG on a key. `key` counts from 0 at the top left, row
+    /// by row. Use [`crate::keyimage`] to make the JPEG at the key's size
+    /// ([`Model::keys`]).
     pub fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()> {
-        let id = image_id(key)?;
+        let screen = *self.model.keys.get(key).ok_or(Error::NoSuchKey(key))?;
+        self.send_image(screen, jpeg)
+    }
+
+    /// Puts a ready JPEG on one segment of the touch strip (the N4).
+    pub fn set_strip_jpeg(&mut self, segment: usize, jpeg: &[u8]) -> Result<()> {
+        let screen = *self
+            .model
+            .strip
+            .and_then(|s| s.segments.get(segment))
+            .ok_or(Error::NoSuchKey(segment))?;
+        self.send_image(screen, jpeg)
+    }
+
+    fn send_image(&mut self, screen: Screen, jpeg: &[u8]) -> Result<()> {
         let len = u16::try_from(jpeg.len()).map_err(|_| Error::TooLong {
             len: jpeg.len(),
             max: u16::MAX as usize,
         })?;
         let [hi, lo] = len.to_be_bytes();
-        self.cmd(&[b'B', b'A', b'T', 0, 0, hi, lo, id])?;
-        for page in jpeg.chunks(OUT_LEN) {
+        self.cmd(&[b'B', b'A', b'T', 0, 0, hi, lo, screen.id])?;
+        for page in jpeg.chunks(self.model.packet) {
             self.raw(page)?;
         }
         self.cmd(b"STP")
@@ -158,12 +162,17 @@ impl<T: Transport> M18<T> {
         self.cmd(&body)
     }
 
-    /// Sets every ring LED (0-21 the ring, 22-23 the front). `colors`
-    /// shorter than 24 leaves the rest dark. The first time, also turns the
-    /// ring's brightness up, after the colours so they aren't wiped.
+    /// Sets every ring LED (on the M18, 0-21 the ring and 22-23 the front).
+    /// `colors` shorter than the ring leaves the rest dark. The first time,
+    /// also turns the ring's brightness up, after the colours so they
+    /// aren't wiped. Does nothing on a model without lights.
     pub fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> {
-        let mut frame = Vec::with_capacity(LAYOUT.ring_leds * 3);
-        for i in 0..LAYOUT.ring_leds {
+        let leds = self.model.ring_leds;
+        if leds == 0 {
+            return Ok(());
+        }
+        let mut frame = Vec::with_capacity(leds * 3);
+        for i in 0..leds {
             let Rgb(r, g, b) = colors.get(i).copied().unwrap_or_default();
             frame.extend_from_slice(&[r, g, b]);
         }
@@ -179,7 +188,7 @@ impl<T: Transport> M18<T> {
     /// sent again first so the brightness render picks them up.
     pub fn set_ring_brightness(&mut self, pct: u8) -> Result<()> {
         let pct = pct.min(100);
-        if self.ring_brightness == Some(pct) {
+        if self.model.ring_leds == 0 || self.ring_brightness == Some(pct) {
             return Ok(());
         }
         if let Some(frame) = self.ring_frame.clone() {
@@ -201,6 +210,9 @@ impl<T: Transport> M18<T> {
 
     /// Hands the strip back to the dock's own lighting.
     pub fn ring_reset(&mut self) -> Result<()> {
+        if self.model.ring_leds == 0 {
+            return Ok(());
+        }
         self.ring_frame = None;
         self.cmd(b"DELED")
     }
@@ -212,11 +224,23 @@ impl<T: Transport> M18<T> {
     }
 
     /// Reads one event, waiting up to `timeout_ms`. `Ok(None)` on timeout or
-    /// for reports that aren't key events.
+    /// for reports that aren't input.
     pub fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>> {
+        if let Some(ev) = self.pending.pop_front() {
+            return Ok(Some(ev));
+        }
         let mut buf = [0u8; IN_LEN];
         let n = self.t.read(&mut buf, timeout_ms)?;
-        Ok(parse_event(&buf[..n], &self.buttons))
+        let ev = parse_event(&buf[..n], self.model);
+        if let Some(e) = ev {
+            if e.action == Action::Press && self.model.press_only.contains(&e.raw_id) {
+                self.pending.push_back(InputEvent {
+                    action: Action::Release,
+                    ..e
+                });
+            }
+        }
+        Ok(ev)
     }
 
     pub fn into_transport(self) -> T {
@@ -224,31 +248,50 @@ impl<T: Transport> M18<T> {
     }
 }
 
-/// Maps a grid index (0 = top left) to the M18's image id (bottom row first).
-pub fn image_id(key: usize) -> Result<u8> {
-    if key >= LAYOUT.key_count() {
-        return Err(Error::NoSuchKey(key));
-    }
-    let (row, col) = (key / LAYOUT.columns, key % LAYOUT.columns);
-    Ok(((LAYOUT.rows - 1 - row) * LAYOUT.columns + col + 1) as u8)
-}
-
-/// Parses an input report: `ACK` at the start, id at byte 9, 1/0 at byte 10.
-pub fn parse_event(report: &[u8], buttons: &ButtonMap) -> Option<InputEvent> {
+/// Parses an input report: `ACK` at the start, id at byte 9, state at
+/// byte 10 (0 up, anything else down).
+pub fn parse_event(report: &[u8], model: &Model) -> Option<InputEvent> {
     if report.len() < 11 || &report[..3] != b"ACK" {
         return None;
     }
     let (id, state) = (report[9], report[10]);
-    let control = match id {
-        1..=15 => Control::Key(id as usize - 1),
-        _ if id == buttons.left => Control::Button(Button::Left),
-        _ if id == buttons.middle => Control::Button(Button::Middle),
-        _ if id == buttons.right => Control::Button(Button::Right),
-        _ => Control::Unknown(id),
+    let button = if state == 0 {
+        Action::Release
+    } else {
+        Action::Press
+    };
+    let (control, action) = if let Some(k) = model.key_inputs.iter().position(|&i| i == id) {
+        (Control::Key(k), button)
+    } else if let Some(b) = model.buttons.iter().position(|&i| i == id) {
+        (Control::Button(b), button)
+    } else if let Some((d, dial)) = model
+        .dials
+        .iter()
+        .enumerate()
+        .find(|(_, d)| [d.press, d.left, d.right].contains(&id))
+    {
+        let action = if id == dial.left {
+            Action::Turn(-1)
+        } else if id == dial.right {
+            Action::Turn(1)
+        } else {
+            button
+        };
+        (Control::Dial(d), action)
+    } else {
+        match model.strip {
+            Some(s) if s.taps.contains(&id) => (
+                Control::Touch(s.taps.iter().position(|&i| i == id).unwrap_or(0)),
+                Action::Press,
+            ),
+            Some(s) if id == s.swipe_left => (Control::Strip, Action::Swipe(-1)),
+            Some(s) if id == s.swipe_right => (Control::Strip, Action::Swipe(1)),
+            _ => (Control::Unknown(id), button),
+        }
     };
     Some(InputEvent {
         control,
-        pressed: state == 1,
+        action,
         raw_id: id,
     })
 }
@@ -256,20 +299,22 @@ pub fn parse_event(report: &[u8], buttons: &ButtonMap) -> Option<InputEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{self, M18};
     use crate::transport::FakeTransport;
 
-    fn dock() -> M18<FakeTransport> {
-        M18::new(FakeTransport::default())
+    fn dock() -> StreamDock<FakeTransport> {
+        StreamDock::new(&M18, FakeTransport::default())
     }
 
     #[test]
     fn top_left_key_is_image_id_0x0b() {
         // Seen on the real dock: image id 0x0B lit the top-left key.
-        assert_eq!(image_id(0).unwrap(), 0x0B);
-        assert_eq!(image_id(4).unwrap(), 0x0F);
-        assert_eq!(image_id(10).unwrap(), 0x01);
-        assert_eq!(image_id(14).unwrap(), 0x05);
-        assert!(image_id(15).is_err());
+        let id = |k: usize| M18.keys[k].id;
+        assert_eq!(id(0), 0x0B);
+        assert_eq!(id(4), 0x0F);
+        assert_eq!(id(10), 0x01);
+        assert_eq!(id(14), 0x05);
+        assert!(dock().set_key_jpeg(15, &[1]).is_err());
     }
 
     #[test]
@@ -307,6 +352,28 @@ mod tests {
     }
 
     #[test]
+    fn small_packet_models_send_smaller_pages() {
+        let mut d = StreamDock::new(&models::D293S_512, FakeTransport::default());
+        d.set_key_jpeg(0, &[0; 1100]).unwrap();
+        let w = d.into_transport().written;
+        assert_eq!(w[0][12], 0x0d); // the 293S's top-left image id
+        assert_eq!(
+            w[1..4].iter().map(Vec::len).collect::<Vec<_>>(),
+            [512, 512, 76]
+        );
+    }
+
+    #[test]
+    fn strip_segments_have_their_own_ids() {
+        let mut d = StreamDock::new(&models::N4, FakeTransport::default());
+        d.set_strip_jpeg(2, &[0; 10]).unwrap();
+        assert!(d.set_strip_jpeg(4, &[0; 10]).is_err());
+        assert!(dock().set_strip_jpeg(0, &[0; 10]).is_err());
+        let w = d.into_transport().written;
+        assert_eq!(w[0], b"CRT\0\0BAT\0\0\x00\x0a\x03");
+    }
+
+    #[test]
     fn ring_sends_24_triples() {
         let mut d = dock();
         d.set_ring(&[Rgb(0, 80, 255); 24]).unwrap();
@@ -317,6 +384,15 @@ mod tests {
         // First use turns the ring brightness up, after the colours.
         assert_eq!(w[1], b"CRT\0\0LBLIG\x64");
         assert_eq!(w.len(), 2);
+    }
+
+    #[test]
+    fn models_without_lights_ignore_the_ring() {
+        let mut d = StreamDock::new(&models::N3, FakeTransport::default());
+        d.set_ring(&[Rgb(1, 2, 3)]).unwrap();
+        d.set_ring_brightness(50).unwrap();
+        d.ring_reset().unwrap();
+        assert!(d.into_transport().written.is_empty());
     }
 
     #[test]
@@ -351,30 +427,43 @@ mod tests {
 
     #[test]
     fn events_map_to_keys_and_buttons() {
-        let b = ButtonMap::default();
-        let e = parse_event(&report(0x01, 1), &b).unwrap();
+        let ev = |id, state| parse_event(&report(id, state), &M18).unwrap();
+        let e = ev(0x01, 1);
         assert_eq!(e.control, Control::Key(0));
-        assert!(e.pressed);
-        assert_eq!(
-            parse_event(&report(0x0F, 0), &b).unwrap().control,
-            Control::Key(14)
-        );
-        assert_eq!(
-            parse_event(&report(0x25, 1), &b).unwrap().control,
-            Control::Button(Button::Left)
-        );
-        assert_eq!(
-            parse_event(&report(0x30, 1), &b).unwrap().control,
-            Control::Button(Button::Middle)
-        );
-        assert_eq!(
-            parse_event(&report(0x31, 1), &b).unwrap().control,
-            Control::Button(Button::Right)
-        );
-        assert_eq!(
-            parse_event(&report(0x40, 1), &b).unwrap().control,
-            Control::Unknown(0x40)
-        );
-        assert!(parse_event(b"NAK", &b).is_none());
+        assert_eq!(e.action, Action::Press);
+        assert_eq!(ev(0x0F, 0).control, Control::Key(14));
+        assert_eq!(ev(0x0F, 0).action, Action::Release);
+        assert_eq!(ev(0x25, 1).control, Control::Button(0));
+        assert_eq!(ev(0x30, 1).control, Control::Button(1));
+        assert_eq!(ev(0x31, 1).control, Control::Button(2));
+        assert_eq!(ev(0x40, 1).control, Control::Unknown(0x40));
+        assert!(parse_event(b"NAK", &M18).is_none());
+    }
+
+    #[test]
+    fn knobs_turn_and_press() {
+        let ev = |id, state| parse_event(&report(id, state), &models::N3).unwrap();
+        assert_eq!(ev(0x50, 0).control, Control::Dial(0));
+        assert_eq!(ev(0x50, 0).action, Action::Turn(-1));
+        assert_eq!(ev(0x91, 0).action, Action::Turn(1));
+        assert_eq!(ev(0x91, 0).control, Control::Dial(1));
+        assert_eq!(ev(0x34, 1).control, Control::Dial(2));
+        assert_eq!(ev(0x34, 1).action, Action::Press);
+        assert_eq!(ev(0x25, 1).control, Control::Button(0));
+    }
+
+    #[test]
+    fn press_only_controls_get_a_release() {
+        let mut fake = FakeTransport::default();
+        fake.to_read.push_back(report(0x41, 1)); // N4 strip, second segment
+        fake.to_read.push_back(report(0x39, 1)); // swipe right
+        let mut d = StreamDock::new(&models::N4, fake);
+        let a = d.read_event(0).unwrap().unwrap();
+        let b = d.read_event(0).unwrap().unwrap();
+        let c = d.read_event(0).unwrap().unwrap();
+        assert_eq!((a.control, a.action), (Control::Touch(1), Action::Press));
+        assert_eq!((b.control, b.action), (Control::Touch(1), Action::Release));
+        assert_eq!((c.control, c.action), (Control::Strip, Action::Swipe(1)));
+        assert!(d.read_event(0).unwrap().is_none());
     }
 }

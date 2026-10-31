@@ -12,21 +12,18 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agora_device::keyimage::{self, Orientation};
+use agora_device::keyimage;
 use agora_device::worker::{Command, DockWorker, Event};
-use agora_device::{discover, Button, Control, Rgb};
+use agora_device::{discover, models, Action, Control, Model, Rgb};
 use agora_host::{
-    face, manifest, ActionInfo, Config, DeviceDesc, HostEvent, HostHandle, KeyInfo, LayoutOp,
-    LayoutView, Look, PluginInfo, Source,
+    face, manifest, ActionInfo, Config, DeviceDesc, DialInput, HostEvent, HostHandle, KeyInfo,
+    LayoutOp, LayoutView, Look, PluginInfo, Source, BUTTON_BASE, DIAL_BASE,
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
-
-/// M18 key image size, used for previews before a dock has connected.
-const KEY_SIZE: u32 = 64;
 
 /// The connected dock, if any. The connection thread fills and clears it.
 /// What Agora remembers between runs, in %APPDATA%\Agora\settings.json.
@@ -45,6 +42,9 @@ struct Settings {
     /// Each light's colour (22 ring + 2 front), when painted one by one.
     /// Empty means the whole ring is `ring_color`.
     ring_colors: Vec<String>,
+    /// The model last plugged in ("M18", "N4"...), so the editor shows the
+    /// right keys before the dock connects.
+    last_model: String,
 }
 
 impl Default for Settings {
@@ -57,6 +57,7 @@ impl Default for Settings {
             use_vsd_craft_plugins: false,
             start_with_windows: false,
             ring_colors: Vec::new(),
+            last_model: models::M18.id.into(),
         }
     }
 }
@@ -104,7 +105,6 @@ fn apply_settings(worker: &DockWorker, s: &Settings) {
 struct Dock {
     worker: Option<DockWorker>,
     model: Option<String>,
-    orientation: Orientation,
     /// The last connection message, for a window that opens later.
     message: String,
     settings: Settings,
@@ -116,7 +116,6 @@ impl Default for Dock {
         Self {
             worker: None,
             model: None,
-            orientation: Orientation::default(),
             message: String::new(),
             settings: Settings::default(),
             settings_path: PathBuf::from("settings.json"),
@@ -125,6 +124,14 @@ impl Default for Dock {
 }
 
 impl Dock {
+    /// The model plugged in, or the last one seen.
+    fn current_model(&self) -> &'static Model {
+        self.worker
+            .as_ref()
+            .map(|w| w.model)
+            .unwrap_or_else(|| models::by_id(&self.settings.last_model).unwrap_or(&models::M18))
+    }
+
     /// Changes a setting, saves it, and sends `cmd` if a dock is connected.
     fn change(
         &mut self,
@@ -159,19 +166,32 @@ type Previews = Arc<Mutex<HashMap<usize, String>>>;
 #[derive(Clone, Serialize)]
 struct Status {
     connected: bool,
+    /// The connected dock's name.
     model: Option<String>,
+    /// The model the editor shows: the connected one or the last one seen.
+    model_id: String,
+    model_name: String,
     rows: usize,
     columns: usize,
+    buttons: usize,
+    dials: usize,
+    /// Knobs have a strip screen above them (the N4).
+    strip: bool,
+    ring_leds: usize,
+    /// Tried on a real dock of this model.
+    tested: bool,
     message: String,
 }
 
 #[derive(Clone, Serialize)]
 struct Input {
-    /// "key", "button" or "unknown"
+    /// "key", "button", "dial", "touch", "strip" or "unknown"
     kind: &'static str,
-    /// Key index from 0 at the top left, or 0/1/2 for left/middle/right.
+    /// Key index from 0 at the top left; buttons and knobs from 0 on the left.
     index: usize,
     pressed: bool,
+    /// Knob steps or swipe direction; 0 for presses.
+    turn: i8,
     raw_id: u8,
 }
 
@@ -188,13 +208,32 @@ struct PluginLine {
 }
 
 fn status(dock: &Dock, message: impl Into<String>) -> Status {
-    let layout = dock.worker.as_ref().map(|w| w.layout);
+    let m = dock.current_model();
     Status {
         connected: dock.worker.is_some(),
         model: dock.model.clone(),
-        rows: layout.map_or(3, |l| l.rows),
-        columns: layout.map_or(5, |l| l.columns),
+        model_id: m.id.into(),
+        model_name: m.name.into(),
+        rows: m.rows,
+        columns: m.columns,
+        buttons: m.buttons.len(),
+        dials: m.dials.len(),
+        strip: m.strip.is_some(),
+        ring_leds: m.ring_leds,
+        tested: m.tested,
         message: message.into(),
+    }
+}
+
+/// The dock as the plugin host describes it to plugins.
+fn device_desc(m: &Model) -> DeviceDesc {
+    DeviceDesc {
+        id: m.id.into(),
+        name: m.name.into(),
+        rows: m.rows,
+        columns: m.columns,
+        buttons: m.buttons.len(),
+        dials: m.dials.len(),
     }
 }
 
@@ -426,11 +465,16 @@ fn vsd_profiles_dir() -> Option<PathBuf> {
     })
 }
 
-/// VSD Craft profiles made for the M18 that Agora can bring in.
+/// VSD Craft profiles made for the model in use that Agora can bring in.
 #[tauri::command]
-fn list_vsd_profiles() -> Vec<agora_host::vsd_import::VsdProfile> {
+fn list_vsd_profiles(state: State<Shared>) -> Vec<agora_host::vsd_import::VsdProfile> {
+    // Only profiles made for this model; VSD Craft's names for the others
+    // aren't known yet.
+    let Some(device) = state.lock().unwrap().current_model().vsd_device else {
+        return Vec::new();
+    };
     vsd_profiles_dir()
-        .map(|d| agora_host::vsd_import::list(&d, "VSDM18"))
+        .map(|d| agora_host::vsd_import::list(&d, device))
         .unwrap_or_default()
 }
 
@@ -618,6 +662,7 @@ fn find_node() -> Option<PathBuf> {
 fn start_host(
     app: &AppHandle,
     use_vsd_craft: bool,
+    model: &Model,
 ) -> Result<(HostHandle, Receiver<HostEvent>), String> {
     let data = data_dir(app);
     let own = data.join("plugins");
@@ -631,12 +676,7 @@ fn start_host(
         plugin_dirs,
         data_dir: data,
         node: find_node(),
-        device: DeviceDesc {
-            id: "M18".into(),
-            name: "Stream Dock M18".into(),
-            rows: 3,
-            columns: 5,
-        },
+        device: device_desc(model),
     };
     let (tx, rx) = std::sync::mpsc::channel();
     Ok((HostHandle::start(config, tx)?, rx))
@@ -652,8 +692,11 @@ fn restart_host(
     let old = host.lock().unwrap().take();
     drop(old);
     previews.lock().unwrap().clear();
-    let use_vsd = shared.lock().unwrap().settings.use_vsd_craft_plugins;
-    let (h, events) = start_host(app, use_vsd)?;
+    let (use_vsd, model) = {
+        let dock = shared.lock().unwrap();
+        (dock.settings.use_vsd_craft_plugins, dock.current_model())
+    };
+    let (h, events) = start_host(app, use_vsd, model)?;
     if shared.lock().unwrap().worker.is_some() {
         h.device_connected(true);
     }
@@ -759,22 +802,35 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
     for ev in events {
         match ev {
             HostEvent::Face { key, face: f } => {
-                let (size, orientation) = {
+                let (model, connected) = {
                     let dock = shared.lock().unwrap();
-                    (
-                        dock.worker.as_ref().map_or(KEY_SIZE, |w| w.layout.key_size),
-                        dock.orientation,
-                    )
+                    (dock.current_model(), dock.worker.is_some())
                 };
-                let img = face::render(&f, size);
+                // Screen keys get their own size; a knob's face goes on its
+                // strip segment (the N4); buttons have no screen.
+                let mut img = face::render(&f, model.key_size());
+                let mut send = None;
+                if let Some(screen) = model.keys.get(key) {
+                    if screen.width != model.key_size() {
+                        img = face::render(&f, screen.width);
+                    }
+                    send = keyimage::to_jpeg(&img, screen.width, screen.height, model.orientation)
+                        .ok()
+                        .map(|j| Command::SetKeyJpeg(key, j));
+                } else if let Some(seg) = key
+                    .checked_sub(DIAL_BASE)
+                    .and_then(|d| model.strip.and_then(|s| s.segments.get(d).map(|g| (d, *g))))
                 {
-                    let dock = shared.lock().unwrap();
-                    if let Some(w) = dock.worker.as_ref() {
-                        if key < w.layout.key_count() {
-                            if let Ok(jpeg) = keyimage::to_key_jpeg(&img, size, orientation) {
-                                w.send(Command::SetKeyJpeg(key, jpeg));
-                            }
-                        }
+                    let (d, seg) = seg;
+                    img = face::render(&f, seg.height);
+                    let wide = keyimage::letterbox(&img, seg.width, seg.height);
+                    send = keyimage::to_jpeg(&wide, seg.width, seg.height, model.orientation)
+                        .ok()
+                        .map(|j| Command::SetStripJpeg(d, j));
+                }
+                if let (Some(cmd), true) = (send, connected) {
+                    if let Some(w) = shared.lock().unwrap().worker.as_ref() {
+                        w.send(cmd);
                     }
                 }
                 let empty = f == face::Face::default();
@@ -870,21 +926,32 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
         let opened = discover::api().and_then(|api| {
             let found = discover::find(&api);
             let first = found.first().ok_or(agora_device::Error::Disconnected)?;
-            let model = first.model.to_string();
-            let dock = discover::open_m18(&api, first)?;
-            Ok((model, DockWorker::start(dock)?))
+            let dock = discover::open(&api, first)?;
+            Ok(DockWorker::start(dock)?)
         });
         match opened {
-            Ok((model, (worker, events))) => {
+            Ok((worker, events)) => {
+                let m = worker.model;
+                let model = m.name.to_string();
                 {
                     let mut dock = shared.lock().unwrap();
                     apply_settings(&worker, &dock.settings);
                     dock.worker = Some(worker);
                     dock.model = Some(model.clone());
-                    report(&app, &mut dock, format!("{model} connected"));
+                    if dock.settings.last_model != m.id {
+                        dock.settings.last_model = m.id.into();
+                        save_settings(&dock.settings_path, &dock.settings);
+                    }
+                    let msg = if m.tested {
+                        format!("{model} connected")
+                    } else {
+                        format!("{model} connected. Agora hasn't been tried on this model yet; tell us what works.")
+                    };
+                    report(&app, &mut dock, msg);
                 }
                 // Put every key's face back on the freshly opened dock.
                 tell_host(&|h| {
+                    h.set_device(device_desc(m));
                     h.device_connected(true);
                     h.redraw_all();
                 });
@@ -903,7 +970,7 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
                 report(
                     &app,
                     &mut dock,
-                    "No dock found. Plug in the M18 and close VSD Craft.".into(),
+                    "No dock found. Plug in your Stream Dock and close VSD Craft.".into(),
                 );
             }
             Err(e) => {
@@ -920,16 +987,31 @@ fn forward_events(app: &AppHandle, host: &Host, events: Receiver<Event>) {
     for ev in events {
         match ev {
             Event::Input(i) => {
+                let pressed = i.action == Action::Press;
+                let turn = match i.action {
+                    Action::Turn(t) | Action::Swipe(t) => t,
+                    _ => 0,
+                };
                 let (kind, index) = match i.control {
                     Control::Key(k) => ("key", k),
-                    Control::Button(Button::Left) => ("button", 0),
-                    Control::Button(Button::Middle) => ("button", 1),
-                    Control::Button(Button::Right) => ("button", 2),
+                    Control::Button(b) => ("button", b),
+                    Control::Dial(d) => ("dial", d),
+                    Control::Touch(t) => ("touch", t),
+                    Control::Strip => ("strip", 0),
                     Control::Unknown(_) => ("unknown", 0),
                 };
-                if kind == "key" {
-                    if let Some(h) = host.lock().unwrap().as_ref() {
-                        h.key(index, i.pressed);
+                if let Some(h) = host.lock().unwrap().as_ref() {
+                    match (i.control, i.action) {
+                        (Control::Key(k), Action::Press | Action::Release) => h.key(k, pressed),
+                        (Control::Button(b), Action::Press | Action::Release) => {
+                            h.key(BUTTON_BASE + b, pressed)
+                        }
+                        (Control::Dial(d), Action::Turn(t)) => h.dial(d, DialInput::Turn(t.into())),
+                        (Control::Dial(d), Action::Press) => h.dial(d, DialInput::Press),
+                        (Control::Dial(d), Action::Release) => h.dial(d, DialInput::Release),
+                        (Control::Touch(t), Action::Press) => h.dial(t, DialInput::Tap),
+                        (Control::Strip, Action::Swipe(s)) => h.swipe(s.into()),
+                        _ => {}
                     }
                 }
                 let _ = app.emit(
@@ -937,7 +1019,8 @@ fn forward_events(app: &AppHandle, host: &Host, events: Receiver<Event>) {
                     Input {
                         kind,
                         index,
-                        pressed: i.pressed,
+                        pressed,
+                        turn,
                         raw_id: i.raw_id,
                     },
                 );

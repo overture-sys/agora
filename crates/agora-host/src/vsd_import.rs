@@ -5,7 +5,7 @@
 //! A profile is a `<id>.sdProfile` folder with a `manifest.json`. Its
 //! `Actions` are the first page, keyed "column,row"; `Pages.Pages` names more
 //! pages and folders live beside them in `profiles/<id>.sdProfile`. Column 5
-//! on the M18 is the three round buttons.
+//! on the M18 is the three round buttons (Agora's buttons 100 to 102).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::builtin;
+use crate::host::BUTTON_BASE;
 
 /// A VSD Craft profile that can be imported.
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +123,7 @@ pub(crate) fn read(
     dir: &Path,
     columns: usize,
     rows: usize,
+    buttons: usize,
     known: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(ReadProfile, Vec<String>), String> {
     let m = load(&dir.join("manifest.json")).ok_or("That isn't a VSD Craft profile")?;
@@ -133,6 +135,7 @@ pub(crate) fn read(
         root: dir.to_path_buf(),
         columns,
         rows,
+        buttons,
         known,
         skipped: Vec::new(),
         depth: 0,
@@ -179,6 +182,8 @@ struct Reader<'a> {
     root: PathBuf,
     columns: usize,
     rows: usize,
+    /// Round buttons, which VSD Craft keeps in the column after the keys.
+    buttons: usize,
     known: &'a dyn Fn(&str) -> Option<String>,
     skipped: Vec<String>,
     depth: usize,
@@ -198,13 +203,18 @@ impl Reader<'_> {
                 continue;
             };
             let name = a.get("Name").and_then(Value::as_str).unwrap_or("?");
-            if c >= self.columns || r >= self.rows {
-                // The M18's round buttons; Agora doesn't run actions on them yet.
-                self.skipped.push(format!("{name} (round button)"));
+            let slot = if c == self.columns && r < self.buttons {
+                // The M18's round buttons, top to bottom in VSD Craft's
+                // list, left to right on the dock.
+                BUTTON_BASE + r
+            } else if c < self.columns && r < self.rows {
+                r * self.columns + c
+            } else {
+                self.skipped.push(format!("{name} (not on this dock)"));
                 continue;
-            }
+            };
             if let Some(k) = self.key(a, dir) {
-                page.keys.push((r * self.columns + c, k));
+                page.keys.push((slot, k));
             }
         }
         page
@@ -530,7 +540,7 @@ mod tests {
 
         let known =
             |a: &str| (a == "com.example.plugin.act").then(|| "com.example.plugin".to_string());
-        let (prof, skipped) = read(&p, 5, 3, &known).unwrap();
+        let (prof, skipped) = read(&p, 5, 3, 3, &known).unwrap();
         assert_eq!(prof.apps, vec!["obs64.exe"]);
         assert_eq!(prof.pages.len(), 2);
         let keys: HashMap<usize, &ReadKey> =
@@ -543,6 +553,9 @@ mod tests {
         assert_eq!(keys[&12].plugin, "com.example.plugin");
         assert_eq!(prof.pages[1].keys[0].0, 14);
         assert!(skipped.contains(&"Missing".to_string()));
-        assert!(skipped.iter().any(|s| s.contains("round button")));
+        // The round button's next-page action lands on the middle button.
+        assert!(keys[&(BUTTON_BASE + 1)].action == builtin::NEXT_PAGE);
+        let (_, skipped) = read(&p, 5, 3, 0, &known).unwrap();
+        assert!(skipped.iter().any(|s| s.contains("not on this dock")));
     }
 }

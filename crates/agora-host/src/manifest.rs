@@ -144,6 +144,13 @@ impl Plugin {
             .strip_suffix(".sdPlugin")
             .ok_or("not a .sdPlugin folder")?
             .to_string();
+        // Some plugins come zipped one folder too deep: the manifest sits in
+        // a single folder inside. That inner folder is the plugin then.
+        let dir = &if dir.join("manifest.json").is_file() {
+            dir.to_path_buf()
+        } else {
+            nested_plugin_dir(dir).ok_or_else(|| format!("{name}: no manifest.json"))?
+        };
         let text = std::fs::read_to_string(dir.join("manifest.json"))
             .map_err(|e| format!("{name}: {e}"))?;
         // Some manifests start with a UTF-8 byte order mark.
@@ -194,6 +201,18 @@ impl Plugin {
             .and_then(|a| a.property_inspector_path.clone())
             .or_else(|| self.manifest.property_inspector_path.clone())
     }
+}
+
+/// The one folder inside `dir` that holds a manifest.json, if there is
+/// exactly one.
+fn nested_plugin_dir(dir: &Path) -> Option<PathBuf> {
+    let mut found = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join("manifest.json").is_file());
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
 }
 
 /// Finds plugins in `dirs`, in order. A plugin id found earlier wins, so put
@@ -310,5 +329,22 @@ mod tests {
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].source, Source::Agora);
         assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn a_plugin_one_folder_too_deep_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("com.example.deep.sdPlugin");
+        let inner = outer.join("com.example.deep.sdPlugin");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(
+            inner.join("manifest.json"),
+            r#"{"Name":"Deep","CodePath":"index.html","Actions":[]}"#,
+        )
+        .unwrap();
+        let (plugins, problems) = discover(&[(root.path().to_path_buf(), Source::Agora)]);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plugins[0].uuid, "com.example.deep");
+        assert_eq!(plugins[0].dir, inner);
     }
 }

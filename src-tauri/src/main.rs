@@ -630,7 +630,9 @@ fn data_dir(app: &AppHandle) -> PathBuf {
 }
 
 /// Node.js for Node plugins: AGORA_NODE, then node\node.exe next to Agora,
-/// then node on PATH, then the Node 20 that VSD Craft ships.
+/// then the Node 20 that VSD Craft ships, then node on PATH. Stream Dock
+/// plugins are built for VSD Craft's Node 20, and some carry add-ons that
+/// only load on the Node they were built for.
 fn find_node() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("AGORA_NODE")
         .map(PathBuf::from)
@@ -647,13 +649,7 @@ fn find_node() -> Option<PathBuf> {
             return Some(dir.join(exe));
         }
     }
-    let on_path = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file()))
-        .unwrap_or(false);
-    if on_path {
-        // The host runs plain "node" from PATH.
-        return None;
-    }
+    // Otherwise the host runs plain "node" from PATH.
     std::env::var_os("ProgramFiles(x86)")
         .map(|pf| {
             PathBuf::from(pf)

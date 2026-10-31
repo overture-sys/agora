@@ -19,5 +19,6 @@ The first public release. Tested on the Stream Dock M18 only.
 - Easier to see and use: stronger edges on fields and buttons, bigger buttons and text, keys named for screen readers, a Rename button on the page tab and an Open button for folders.
 - Home shows the dock, profile and page, and offers to import your VSD Craft profiles when it finds them.
 - The Inter and GFS Didot fonts now ship with Agora.
+- Plugins: VSD Craft's Node 20 is preferred over another Node on PATH; "Information" actions (such as OBS monitors) go on keys; plugins can switch profiles and show alerts on knobs; plugins packed one folder too deep are found.
 
 Support Agora on [Ko-fi](https://ko-fi.com/overturesys).

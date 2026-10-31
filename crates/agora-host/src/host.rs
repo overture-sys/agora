@@ -1113,7 +1113,16 @@ impl State {
     /// to Elgato plugins and "Knob" to Stream Dock ones.
     fn controller(&self, key: usize) -> &'static str {
         if slot(key) != Slot::Dial {
-            return "Keypad";
+            // An action made only for "Information" hears that name back.
+            let info_only = self.layout.keys().get(&key).is_some_and(|i| {
+                self.plugins
+                    .get(&i.plugin)
+                    .and_then(|p| p.action(&i.action))
+                    .is_some_and(|a| {
+                        !a.controllers.is_empty() && a.controllers.iter().all(|c| c == "Information")
+                    })
+            });
+            return if info_only { "Information" } else { "Keypad" };
         }
         let knob = self.layout.keys().get(&key).is_some_and(|i| {
             self.plugins
@@ -1437,7 +1446,10 @@ impl State {
         };
         match controller {
             "Encoder" => a.controllers.iter().any(|c| c == "Encoder" || c == "Knob"),
-            _ => a.controllers.is_empty() || a.controllers.iter().any(|c| c == "Keypad"),
+            _ => {
+                a.controllers.is_empty()
+                    || a.controllers.iter().any(|c| c == "Keypad" || c == "Information")
+            }
         }
     }
 
@@ -2219,7 +2231,11 @@ impl State {
                 .filter(|a| a.visible_in_actions_list)
             {
                 let mut controllers = Vec::new();
-                if a.controllers.is_empty() || a.controllers.iter().any(|c| c == "Keypad") {
+                // "Information" actions only show something; on a Stream
+                // Dock they go on a key like any other.
+                if a.controllers.is_empty()
+                    || a.controllers.iter().any(|c| c == "Keypad" || c == "Information")
+                {
                     controllers.push("Keypad".to_string());
                 }
                 if a.controllers.iter().any(|c| c == "Encoder" || c == "Knob") {
@@ -2473,7 +2489,25 @@ impl State {
                 self.redraw(k);
             }
             ("showOk", Some(k)) => self.flash(k, Overlay::Ok),
-            ("showAlert", Some(k)) => self.flash(k, Overlay::Alert),
+            ("showAlert" | "showAlertOnEncoder", Some(k)) => self.flash(k, Overlay::Alert),
+            // A plugin asks for a profile by name.
+            ("switchToProfile", _) => {
+                let wanted = payload.get("profile").and_then(Value::as_str).unwrap_or("");
+                let id = self
+                    .layout
+                    .profiles
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(wanted.trim()))
+                    .map(|p| p.id.clone());
+                match id {
+                    Some(id) => {
+                        self.auto_from = None;
+                        self.switch_profile(&id);
+                        self.emit(HostEvent::PageChanged);
+                    }
+                    None => self.log(uuid, format!("No profile called '{wanted}' to switch to")),
+                }
+            }
             ("setSettings", Some(k)) => {
                 if let Some(inst) = self.layout.keys_mut().get_mut(&k) {
                     inst.settings = payload;
@@ -2562,9 +2596,7 @@ impl State {
             (
                 "setFeedback"
                 | "setFeedbackLayout"
-                | "setTriggerDescription"
-                | "switchToProfile"
-                | "showAlertOnEncoder",
+                | "setTriggerDescription",
                 _,
             ) => {}
             (other, _) => self.log(uuid, format!("Ignored event '{other}'")),

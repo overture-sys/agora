@@ -96,7 +96,7 @@ fn node_plugin_round_trip() {
     host.device_connected(true);
 
     let actions = plugin_actions(&host);
-    assert_eq!(actions.len(), 2);
+    assert_eq!(actions.len(), 3);
     assert_eq!(actions[1].controllers, ["Encoder"]);
     assert!(actions[0]
         .icon
@@ -299,7 +299,7 @@ fn hiding_and_forgetting_plugins() {
     assert!(plugin_actions(&host).is_empty());
     assert!(host.plugins()[0].hidden);
     host.set_hidden("com.agora.testplugin", false);
-    assert_eq!(plugin_actions(&host).len(), 2);
+    assert_eq!(plugin_actions(&host).len(), 3);
 
     // Forgetting drops it and hands back its folder.
     let dir = host.forget("com.agora.testplugin").unwrap();
@@ -656,4 +656,43 @@ fn removals_can_be_undone_until_something_else_changes() {
     let o = host.overview().unwrap();
     assert_eq!(o.layout.page, second);
     assert_eq!(o.keys.iter().map(|k| k.key).collect::<Vec<_>>(), vec![5]);
+}
+
+#[test]
+fn information_actions_go_on_keys_and_plugins_switch_profiles() {
+    if !node_ok() {
+        eprintln!("skipping: needs Node 22+ on PATH");
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.device_connected(true);
+    host.layout_op(LayoutOp::AddProfile("Second".into())).unwrap();
+    let first = host.layout().unwrap().profiles[0].id.clone();
+    host.layout_op(LayoutOp::SwitchProfile(first.clone())).unwrap();
+
+    // An "Information" action shows in the list for keys and goes on one.
+    let monitor = plugin_actions(&host)
+        .into_iter()
+        .find(|a| a.action == "com.agora.testplugin.monitor")
+        .unwrap();
+    assert_eq!(monitor.controllers, vec!["Keypad".to_string()]);
+    host.place(0, "com.agora.testplugin", "com.agora.testplugin.monitor")
+        .unwrap();
+    wait_for(
+        &rx,
+        10,
+        |e| matches!(e, HostEvent::Face { key, face } if *key == 0 && face.title == "hello"),
+    );
+
+    // Its key press asks for the profile called "Second".
+    host.key(0, true);
+    host.key(0, false);
+    let end = Instant::now() + Duration::from_secs(5);
+    while host.layout().unwrap().profile == first && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let view = host.layout().unwrap();
+    let second = view.profiles.iter().find(|p| p.name == "Second").unwrap();
+    assert_eq!(view.profile, second.id);
 }

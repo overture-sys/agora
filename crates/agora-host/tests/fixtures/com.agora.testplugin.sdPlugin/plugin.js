@@ -10,6 +10,8 @@ ws.onmessage = (e) => {
   if (m.event === 'willAppear') {
     send({ event: 'setTitle', context: m.context, payload: { title: 'hello', target: 0 } });
     send({ event: 'getGlobalSettings', context: args.pluginUUID });
+  } else if (m.event === 'keyDown' && m.action === 'com.agora.testplugin.monitor') {
+    send({ event: 'switchToProfile', context: args.pluginUUID, device: m.device, payload: { profile: 'Second' } });
   } else if (m.event === 'keyDown') {
     const count = ((m.payload.settings || {}).count || 0) + 1;
     send({ event: 'setSettings', context: m.context, payload: { count } });

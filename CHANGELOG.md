@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.1 beta (2026-10-31)
+- Light or dark: choose Like Windows, Light or Dark on the Dock page, or flip it with the sun/moon button at the foot of the side bar. Agora remembers it, and the window's title bar follows.
+
 ## 0.6.0 beta (2026-10-31)
 The first public release. Tested on the Stream Dock M18 only.
 

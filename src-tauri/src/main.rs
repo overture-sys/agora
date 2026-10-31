@@ -45,6 +45,8 @@ struct Settings {
     /// The model last plugged in ("M18", "N4"...), so the editor shows the
     /// right keys before the dock connects.
     last_model: String,
+    /// "system" (follow Windows), "light" or "dark".
+    theme: String,
 }
 
 impl Default for Settings {
@@ -58,6 +60,7 @@ impl Default for Settings {
             start_with_windows: false,
             ring_colors: Vec::new(),
             last_model: models::M18.id.into(),
+            theme: "system".into(),
         }
     }
 }
@@ -421,6 +424,26 @@ fn set_start_with_windows(state: State<Shared>, on: bool) -> Result<(), String> 
     let mut dock = state.lock().unwrap();
     dock.settings.start_with_windows = on;
     save_settings(&dock.settings_path, &dock.settings);
+    Ok(())
+}
+
+/// Light, dark or the Windows setting, for the window and its title bar.
+#[tauri::command]
+fn set_theme(app: AppHandle, state: State<Shared>, theme: String) -> Result<(), String> {
+    let native = match theme.as_str() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        "system" => None,
+        _ => return Err("Unknown theme".into()),
+    };
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_theme(native);
+    }
+    let mut dock = state.lock().unwrap();
+    if dock.settings.theme != theme {
+        dock.settings.theme = theme;
+        save_settings(&dock.settings_path, &dock.settings);
+    }
     Ok(())
 }
 
@@ -1100,6 +1123,7 @@ fn main() {
             key_previews,
             get_layout,
             page_overview,
+            set_theme,
             open_link,
             hide_plugin,
             undo,

@@ -25,7 +25,7 @@
   type Preview = { key: number; image: string | null };
   type PageOverview = { layout: LayoutView; keys: KeyInfo[] };
   type Line = { plugin: string; message: string };
-  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[] };
+  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[]; theme?: string };
   type LogLine = { time: string; text: string; err: boolean };
   type Page = "home" | "keys" | "plugins" | "dock";
 
@@ -576,6 +576,42 @@
     await call("set_use_vsd_craft_plugins", { on });
   }
 
+  // ---- look ----
+
+  type Theme = "system" | "light" | "dark";
+  const themes: { id: Theme; label: string }[] = [
+    { id: "system", label: "Like Windows" },
+    { id: "light", label: "Light" },
+    { id: "dark", label: "Dark" },
+  ];
+  // Applied before the settings arrive, so the window doesn't flash.
+  let savedTheme: Theme = "system";
+  try {
+    savedTheme = (localStorage.getItem("agora.theme") as Theme) || "system";
+  } catch {}
+  let theme = $state<Theme>(savedTheme);
+
+  function applyTheme(t: Theme) {
+    if (t === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = t;
+  }
+  applyTheme(savedTheme);
+  // Whether Windows is in dark mode, for "Like Windows".
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  let systemDark = $state(darkQuery.matches);
+  darkQuery.addEventListener("change", (e) => (systemDark = e.matches));
+  const darkNow = $derived(theme === "dark" || (theme === "system" && systemDark));
+
+  async function setTheme(t: Theme, save = true) {
+    theme = t;
+    applyTheme(t);
+    try {
+      localStorage.setItem("agora.theme", t);
+    } catch {}
+    if (save) await call("set_theme", { theme: t });
+    else invoke("set_theme", { theme: t }).catch(() => {});
+  }
+
   // ---- dock ----
 
   async function setRing(color: string) {
@@ -710,7 +746,11 @@
   onMount(() => {
     refreshStatus();
     loadPreviews();
-    call<Settings>("get_settings").then((s) => s && (settings = s));
+    call<Settings>("get_settings").then((s) => {
+      if (!s) return;
+      settings = s;
+      setTheme((s.theme as Theme) || "system", false);
+    });
     call<Action[]>("list_actions").then((a) => (actions = a ?? []));
     refreshPlugins();
     refreshPage();
@@ -1148,6 +1188,14 @@
       </button>
     {/each}
     <div class="rail-foot">
+      <button class="theme-toggle" onclick={() => setTheme(darkNow ? "light" : "dark")}
+        aria-label={darkNow ? "Switch to the light theme" : "Switch to the dark theme"} title={darkNow ? "Light theme" : "Dark theme"}>
+        {#if darkNow}
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
+        {:else}
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" /></svg>
+        {/if}
+      </button>
       <span class="pill" class:off={!status.connected}>{status.connected ? status.model ?? "Connected" : "No dock"}</span>
     </div>
   </nav>
@@ -1417,6 +1465,14 @@
 
         <section class="screen-card">
           <h2>Agora</h2>
+          <div class="theme-row">
+            <span>Look</span>
+            <div class="seg" role="group" aria-label="Light or dark">
+              {#each themes as t}
+                <button class:active={theme === t.id} aria-pressed={theme === t.id} onclick={() => setTheme(t.id)}>{t.label}</button>
+              {/each}
+            </div>
+          </div>
           <label class="switch-row">
             <input type="checkbox" role="switch" checked={settings.start_with_windows}
               onchange={async (e) => {

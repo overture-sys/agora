@@ -17,7 +17,7 @@ use agora_device::worker::{Command, DockWorker, Event};
 use agora_device::{discover, models, Action, Control, Model, Rgb};
 use agora_host::{
     face, manifest, ActionInfo, Config, DeviceDesc, DialInput, HostEvent, HostHandle, KeyInfo,
-    LayoutOp, LayoutView, Look, PluginInfo, Source, BUTTON_BASE, DIAL_BASE,
+    LayoutOp, LayoutView, Look, PageOverview, PluginInfo, Source, BUTTON_BASE, DIAL_BASE,
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -425,6 +425,11 @@ fn set_start_with_windows(state: State<Shared>, on: bool) -> Result<(), String> 
 }
 
 #[tauri::command]
+fn page_overview(host: State<Host>) -> Result<Option<PageOverview>, String> {
+    with_host(&host, |h| h.overview())
+}
+
+#[tauri::command]
 fn get_layout(host: State<Host>) -> Result<Option<LayoutView>, String> {
     with_host(&host, |h| h.layout())
 }
@@ -757,6 +762,18 @@ fn plugin_dir(host: &State<Host>, uuid: &str) -> Result<(PathBuf, String), Strin
     Ok((PathBuf::from(p.dir), p.source))
 }
 
+/// Opens one of Agora's own pages in the browser: the issue tracker or Ko-fi.
+#[tauri::command]
+fn open_link(which: String) -> Result<(), String> {
+    let url = match which.as_str() {
+        "issues" => "https://gitlab.com/overture-group1/agora/-/issues",
+        "kofi" => "https://ko-fi.com/overturesys",
+        _ => return Err("Unknown link".into()),
+    };
+    open_url(url);
+    Ok(())
+}
+
 #[tauri::command]
 fn open_plugins_folder(app: AppHandle) -> Result<(), String> {
     open_folder(&data_dir(&app).join("plugins"))
@@ -781,6 +798,18 @@ fn remove_plugin(host: State<Host>, uuid: String) -> Result<String, String> {
     trash::delete(&dir)
         .map_err(|e| format!("Agora stopped the plugin but couldn't delete its folder: {e}"))?;
     Ok("deleted".into())
+}
+
+/// Hides a plugin and clears its keys, so the window can offer Undo before
+/// the folder is really deleted.
+#[tauri::command]
+fn hide_plugin(host: State<Host>, uuid: String) -> Result<(), String> {
+    with_host(&host, |h| h.set_hidden(&uuid, true))
+}
+
+#[tauri::command]
+fn undo(host: State<Host>) -> Result<bool, String> {
+    with_host(&host, |h| h.undo())
 }
 
 #[tauri::command]
@@ -1074,6 +1103,10 @@ fn main() {
             show_plugin,
             key_previews,
             get_layout,
+            page_overview,
+            open_link,
+            hide_plugin,
+            undo,
             layout_op,
             set_start_with_windows,
             set_ring_lights,

@@ -13,6 +13,11 @@ The first public release. Tested on the Stream Dock M18 only.
 - Light ring in one colour or painted light by light, with presets.
 - Start with Windows, in the tray.
 - Import of M18 profiles from VSD Craft (read only).
-- Fast page changes on the dock.
+- Fast page changes on the dock and in the window: one question to the host per page change, previews drawn together.
+- Undo (or Ctrl+Z) for a few seconds after removing a key, page, profile or plugin, instead of "Sure? Delete".
+- One status area at the foot of every page for errors, "Saved" and Undo, read out by screen readers.
+- Easier to see and use: stronger edges on fields and buttons, bigger buttons and text, keys named for screen readers, a Rename button on the page tab and an Open button for folders.
+- Home shows the dock, profile and page, and offers to import your VSD Craft profiles when it finds them.
+- The Inter and GFS Didot fonts now ship with Agora.
 
 Support Agora on [Ko-fi](https://ko-fi.com/overturesys).

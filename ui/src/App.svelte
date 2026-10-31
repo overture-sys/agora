@@ -4,6 +4,10 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import "@fontsource/marcellus-sc/400.css";
+  import "@fontsource/inter/400.css";
+  import "@fontsource/inter/500.css";
+  import "@fontsource/inter/600.css";
+  import "@fontsource/gfs-didot/greek-400.css";
 
   type Status = {
     connected: boolean; model: string | null; model_id: string; model_name: string; rows: number; columns: number;
@@ -19,6 +23,7 @@
   type Save = (patch: Record<string, unknown>) => void;
   type LayoutView = { profiles: NameId[]; profile: string; pages: NameId[]; page: string; top_page: string; path: NameId[]; apps: string[] };
   type Preview = { key: number; image: string | null };
+  type PageOverview = { layout: LayoutView; keys: KeyInfo[] };
   type Line = { plugin: string; message: string };
   type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[] };
   type LogLine = { time: string; text: string; err: boolean };
@@ -71,8 +76,11 @@
   let settings = $state<Settings>({ brightness: 80, ring_color: "#d9794a", ring_on: false, ring_brightness: 100, use_vsd_craft_plugins: false, start_with_windows: false, ring_colors: [] });
   let error = $state("");
   let notice = $state("");
-  // The plugin (or "page:id", "profile:id") whose Delete was clicked once and now asks to be sure.
-  let confirming = $state<string | null>(null);
+  // What was just removed, with a way to put it back for a few seconds.
+  type Toast = { text: string; undo: () => Promise<void>; commit?: () => Promise<void> };
+  let toast = $state<Toast | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let layout = $state<LayoutView | null>(null);
   // A page or profile name being edited in place.
   let renaming = $state<{ kind: "page" | "profile"; id: string; name: string } | null>(null);
@@ -87,6 +95,24 @@
   let vsdProfiles = $state<VsdProfile[]>([]);
   let importPick = $state(new Set<string>());
   let importReport = $state<ImportReport | null>(null);
+  // VSD Craft profiles found on this PC, offered on Home.
+  let vsdFound = $state(0);
+  let vsdOfferHidden = $state(false);
+  try {
+    vsdOfferHidden = localStorage.getItem("agora.vsdOfferHidden") === "1";
+  } catch {}
+
+  function hideVsdOffer() {
+    vsdOfferHidden = true;
+    try {
+      localStorage.setItem("agora.vsdOfferHidden", "1");
+    } catch {}
+  }
+
+  async function startImport() {
+    page = "keys";
+    if (!importOpen) await toggleImport();
+  }
 
   // Plugin groups the person has opened in the action list.
   let openGroups = $state(new Set<string>());
@@ -110,17 +136,61 @@
     log = [{ time, text: line, err }, ...log].slice(0, 200);
   }
 
+  // Changes that get a quiet "Saved" in the status area.
+  const savingCommands = new Set([
+    "place_action", "move_key", "set_key_settings", "set_key_look", "layout_op", "set_brightness", "set_ring",
+    "set_ring_lights", "ring_off", "set_ring_brightness", "set_start_with_windows", "set_use_vsd_craft_plugins",
+    "import_vsd_profiles", "show_plugin",
+  ]);
+
+  function flash(text: string) {
+    notice = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = ""), 2500);
+  }
+
   async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T | undefined> {
     error = "";
-    notice = "";
     try {
-      return await invoke<T>(cmd, args);
+      const r = await invoke<T>(cmd, args);
+      if (savingCommands.has(cmd) && !(cmd === "layout_op" && args.op === "go-to-page")) flash("Saved");
+      return r;
     } catch (e) {
       const msg = String(e);
       // Saved for later rather than failed.
-      if (msg.startsWith("Saved.")) notice = msg;
+      if (msg.startsWith("Saved.")) flash(msg);
       else error = msg;
     }
+  }
+
+  /// Shows what was removed with an Undo button. `commit` runs when the
+  /// toast goes away without Undo (deleting a plugin's folder for real).
+  function showUndo(t: Toast) {
+    endToast();
+    toast = t;
+    toastTimer = setTimeout(endToast, 6000);
+  }
+
+  function endToast() {
+    clearTimeout(toastTimer);
+    const t = toast;
+    toast = null;
+    t?.commit?.();
+  }
+
+  async function undoToast() {
+    clearTimeout(toastTimer);
+    const t = toast;
+    toast = null;
+    if (t) await t.undo();
+  }
+
+  /// Puts back the last removed key, page, profile or plugin.
+  async function hostUndo() {
+    const ok = await call<boolean>("undo");
+    if (!ok) error = "That can't be undone any more, because something else changed since.";
+    await refreshAll();
+    loadPreviews();
   }
 
   // ---- keys ----
@@ -149,19 +219,48 @@
 
   // ---- profiles and pages ----
 
-  async function loadLayout() {
-    const before = layout?.page;
-    layout = (await invoke<LayoutView | null>("get_layout").catch(() => null)) ?? null;
-    // Another page: the open key was on the old one.
-    if (before !== undefined && layout && layout.page !== before) loadKey(null);
+  // One question to the host per refresh: the layout and every place's
+  // action together. A refresh asked for while one runs waits for it and
+  // then runs once.
+  let refreshing: Promise<void> | null = null;
+  let refreshAgain = false;
+  // Page changes this window asked for: the host's "page changed" for them
+  // needs no second refresh.
+  let ownChangeUntil = 0;
+
+  function refreshPage(): Promise<void> {
+    if (refreshing) {
+      refreshAgain = true;
+      return refreshing;
+    }
+    refreshing = (async () => {
+      do {
+        refreshAgain = false;
+        const o = await invoke<PageOverview | null>("page_overview").catch(() => null);
+        if (!o) continue;
+        const before = layout?.page;
+        layout = o.layout;
+        const next: Record<number, KeyInfo> = {};
+        for (const ki of o.keys) next[ki.key] = ki;
+        keyInfos = next;
+        // Another page: the open key was on the old one.
+        if (before !== undefined && o.layout.page !== before) loadKey(null);
+      } while (refreshAgain);
+      refreshing = null;
+    })();
+    return refreshing;
   }
 
   async function layoutOp(op: string, id?: string, name?: string, apps?: string[]) {
     renaming = null;
-    confirming = null;
+    // Show the new tab straight away; the host catches up.
+    if (op === "go-to-page" && id && layout?.pages.some((p) => p.id === id)) {
+      layout = { ...layout, top_page: id, page: id, path: [] };
+      loadKey(null);
+    }
+    ownChangeUntil = performance.now() + 1000;
     await call("layout_op", { op, id, name, apps });
-    await loadLayout();
-    loadOverview();
+    await refreshPage();
   }
 
   async function toggleImport() {
@@ -179,7 +278,7 @@
     if (!report) return;
     importReport = report;
     importPick = new Set();
-    await loadLayout();
+    await refreshPage();
     refreshPlugins();
   }
 
@@ -212,13 +311,11 @@
     layoutOp(r.kind === "page" ? "rename-page" : "rename-profile", r.id, r.name);
   }
 
-  function removeWithConfirm(kind: "page" | "profile", id: string) {
-    const tag = `${kind}:${id}`;
-    if (confirming !== tag) {
-      confirming = tag;
-      return;
-    }
-    layoutOp(kind === "page" ? "remove-page" : "remove-profile", id);
+  async function removeWithUndo(kind: "page" | "profile", id: string) {
+    const list = kind === "page" ? layout?.pages : layout?.profiles;
+    const name = list?.find((p) => p.id === id)?.name ?? "";
+    await layoutOp(kind === "page" ? "remove-page" : "remove-profile", id);
+    if (!error) showUndo({ text: `Deleted the ${kind} ${name}.`, undo: hostUndo });
   }
 
   function openFolder(k: number) {
@@ -238,8 +335,7 @@
     if (!info || selected === null) return;
     info.settings = { ...info.settings, ...patch };
     await call("set_key_settings", { key: selected, settings: info.settings });
-    if (info.action === "folder") loadLayout();
-    loadOverview();
+    refreshPage();
   }
 
   async function saveLook(patch: Look) {
@@ -359,13 +455,6 @@
     save({ keys: parts.join("+") });
   }
 
-  async function loadOverview() {
-    const slots = allSlots;
-    const list = await Promise.all(slots.map((k) => invoke<KeyInfo | null>("key_info", { key: k }).catch(() => null)));
-    const next: Record<number, KeyInfo> = {};
-    list.forEach((ki, i) => ki && (next[slots[i]] = ki));
-    keyInfos = next;
-  }
 
   const isDial = (k: number) => k >= DIAL_BASE;
   /// What the user calls a place: "Key 3", "Left button", "Knob 2".
@@ -384,7 +473,7 @@
   async function place(k: number, a: Action) {
     await call("place_action", { key: k, plugin: a.plugin, action: a.action });
     await loadKey(k);
-    loadOverview();
+    refreshPage();
     refreshPlugins();
   }
 
@@ -403,10 +492,13 @@
 
   async function removeKey() {
     if (selected === null) return;
-    await call("clear_key", { key: selected });
-    await loadKey(selected);
-    loadOverview();
+    const k = selected;
+    const what = info?.name ? `${info.name} from ${slotName(k).toLowerCase()}` : slotName(k).toLowerCase();
+    await call("clear_key", { key: k });
+    await loadKey(null);
+    refreshPage();
     setTimeout(refreshPlugins, 500);
+    showUndo({ text: `Removed ${what}.`, undo: async () => { await hostUndo(); loadKey(k); } });
   }
 
   // What's being dragged: an action from the list, or a key that has one.
@@ -423,7 +515,7 @@
       await call("move_key", { from, to: k });
       // Keep the moved action selected.
       await loadKey(selected === from ? k : selected === k ? from : selected);
-      loadOverview();
+      refreshPage();
     }
     dragged = null;
     draggedKey = null;
@@ -451,19 +543,27 @@
   async function refreshAll() {
     actions = (await call<Action[]>("list_actions")) ?? [];
     await refreshPlugins();
-    await loadLayout();
+    await refreshPage();
     await loadKey(selected);
-    await loadOverview();
   }
 
+  /// VSD Craft's plugins are only hidden. Agora's own are hidden first and
+  /// go to the Recycle Bin once the Undo has gone.
   async function removePlugin(p: Plugin) {
-    if (confirming !== p.uuid) {
-      confirming = p.uuid;
-      return;
-    }
-    confirming = null;
-    await call("remove_plugin", { uuid: p.uuid });
+    const own = p.source === "Agora";
+    await call(own ? "hide_plugin" : "remove_plugin", { uuid: p.uuid });
+    if (error) return;
     await refreshAll();
+    showUndo({
+      text: own ? `Deleted ${p.name}.` : `Hid ${p.name}.`,
+      undo: hostUndo,
+      commit: own
+        ? async () => {
+            await call("remove_plugin", { uuid: p.uuid });
+            refreshAll();
+          }
+        : undefined,
+    });
   }
 
   async function showPlugin(p: Plugin) {
@@ -552,7 +652,7 @@
     status = s;
     if (changed) {
       loadKey(null);
-      loadOverview();
+      refreshPage();
       loadPreviews();
     }
   }
@@ -579,6 +679,19 @@
     pressedKeys = next;
   }
 
+  const pendingPreviews = new Map<number, string | null>();
+  let previewFrame = 0;
+  function flushPreviews() {
+    previewFrame = 0;
+    const next = { ...previews };
+    for (const [key, image] of pendingPreviews) {
+      if (image) next[key] = image;
+      else delete next[key];
+    }
+    pendingPreviews.clear();
+    previews = next;
+  }
+
   async function loadPreviews() {
     const list = (await invoke<Preview[]>("key_previews").catch(() => [])) ?? [];
     const p: Record<number, string> = {};
@@ -590,7 +703,7 @@
   const buttonSlots = $derived(Array.from({ length: status.buttons }, (_, b) => BUTTON_BASE + b));
   const dialSlots = $derived(Array.from({ length: status.dials }, (_, d) => DIAL_BASE + d));
   const allSlots = $derived([...Array.from({ length: keyCount }, (_, k) => k), ...buttonSlots, ...dialSlots]);
-  const usedKeys = $derived(Object.keys(previews).length);
+  const usedKeys = $derived(Object.keys(keyInfos).length);
   const runningPlugins = $derived(plugins.filter((p) => p.status === "running").length);
   const visiblePlugins = $derived(plugins.filter((p) => !p.hidden).length);
 
@@ -600,9 +713,15 @@
     call<Settings>("get_settings").then((s) => s && (settings = s));
     call<Action[]>("list_actions").then((a) => (actions = a ?? []));
     refreshPlugins();
-    loadOverview();
-    loadLayout();
+    refreshPage();
+    invoke<VsdProfile[]>("list_vsd_profiles").then((v) => (vsdFound = v?.length ?? 0)).catch(() => {});
     const onKeydown = (e: KeyboardEvent) => {
+      // Ctrl+Z puts back what was just removed, while Undo shows.
+      if (toast && e.key.toLowerCase() === "z" && (e.ctrlKey || e.metaKey) && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault();
+        undoToast();
+        return;
+      }
       if (e.key === "Escape" && page === "keys") {
         if (renaming) renaming = null;
         else loadKey(null);
@@ -624,12 +743,10 @@
       listen<Status>("dock-status", (e) => setStatus(e.payload)),
       listen<Input>("dock-input", (e) => onInput(e.payload)),
       listen<string>("dock-error", (e) => (error = e.payload)),
+      // Faces come one key at a time; draw them together, once a frame.
       listen<Preview>("key-preview", (e) => {
-        const { key, image } = e.payload;
-        const next = { ...previews };
-        if (image) next[key] = image;
-        else delete next[key];
-        previews = next;
+        pendingPreviews.set(e.payload.key, e.payload.image);
+        if (!previewFrame) previewFrame = requestAnimationFrame(flushPreviews);
       }),
       listen<Line>("plugin-status", (e) => {
         addLog(`${e.payload.plugin}: ${e.payload.message}`);
@@ -637,8 +754,7 @@
       }),
         listen<Line>("plugin-log", (e) => addLog(`${e.payload.plugin}: ${e.payload.message}`)),
       listen("page-changed", () => {
-        loadLayout();
-        loadOverview();
+        if (performance.now() > ownChangeUntil) refreshPage();
       }),
       listen("settings-changed", () => call<Settings>("get_settings").then((s) => s && (settings = s))),
       listen("host-restarted", () => {
@@ -686,6 +802,7 @@
       e.preventDefault();
       dropOn(k);
     }}
+    aria-label={`${slotName(k)}, ${keyInfos[k]?.look?.title || keyInfos[k]?.name || "empty"}`}
     title={editable
       ? keyInfos[k]?.action === "folder" && keyInfos[k]?.builtin
         ? `${slotName(k)}: double-click to open the folder`
@@ -725,7 +842,7 @@
 {/snippet}
 
 {#snippet library()}
-    <input class="search" placeholder="Search actions" bind:value={search} />
+    <input class="search" placeholder="Search actions" aria-label="Search actions" bind:value={search} />
                 <div class="actions">
       {#if actions.length === 0}
         <p class="muted">No actions yet. Add plugins on the Plugins page.</p>
@@ -784,9 +901,7 @@
           <button class="small" class:on={importOpen} onclick={toggleImport} aria-expanded={importOpen}
             title="Bring in profiles from VSD Craft">Import</button>
           {#if layout.profiles.length > 1}
-            <button class="small danger" class:sure={confirming === `profile:${layout.profile}`} onclick={() => removeWithConfirm("profile", layout!.profile)}
-              >{confirming === `profile:${layout.profile}` ? "Sure? Delete" : "Delete"}</button
-            >
+            <button class="small danger" onclick={() => removeWithUndo("profile", layout!.profile)}>Delete</button>
           {/if}
         {/if}
       </div>
@@ -837,30 +952,36 @@
           </div>
         </div>
       {/if}
-      <div class="tabs" role="tablist" aria-label="Pages">
+      <nav class="tabs" aria-label="Pages">
         {#each layout.pages as p}
           {@const active = p.id === layout.top_page}
           {#if renaming?.kind === "page" && renaming.id === p.id}
             <!-- svelte-ignore a11y_autofocus -->
-            <input class="rename tab-input" bind:value={renaming.name} autofocus onkeydown={(e) => e.key === "Enter" && finishRename()} onblur={finishRename} />
+            <input class="rename tab-input" bind:value={renaming.name} autofocus aria-label="Page name"
+              onkeydown={(e) => e.key === "Enter" && finishRename()} onblur={finishRename} />
           {:else}
-            <button
-              class="tab"
-              class:active
-              role="tab"
-              aria-selected={active}
-              onclick={() => (active && layout!.path.length === 0 ? startRename("page", p) : layoutOp("go-to-page", p.id))}
-              title={active ? "Click to rename" : `Show ${p.name}`}>{p.name}</button
-            >
+            <span class="tab-wrap" class:active>
+              <button
+                class="tab"
+                class:active
+                aria-current={active ? "page" : undefined}
+                onclick={() => !(active && layout!.path.length === 0) && layoutOp("go-to-page", p.id)}
+                title={active ? p.name : `Show ${p.name}`}>{p.name}</button
+              >
+              {#if active && layout.path.length === 0}
+                <button class="tab-edit" onclick={() => startRename("page", p)} aria-label="Rename {p.name}" title="Rename this page">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4" /></svg>
+                </button>
+              {/if}
+            </span>
           {/if}
         {/each}
         <button class="tab add" onclick={() => layoutOp("add-page")} title="Add a page">+ Page</button>
         {#if layout.pages.length > 1 && layout.path.length === 0}
-          <button class="tab remove" class:sure={confirming === `page:${layout.top_page}`} onclick={() => removeWithConfirm("page", layout!.top_page)}
-            title="Delete this page and the folders on it">{confirming === `page:${layout.top_page}` ? "Sure? Delete page" : "Delete page"}</button
-          >
+          <button class="tab remove" onclick={() => removeWithUndo("page", layout!.top_page)}
+            title="Delete this page and the folders on it. You can undo it.">Delete page</button>
         {/if}
-      </div>
+      </nav>
       {#if layout.path.length}
         <nav class="crumbs" aria-label="Folder">
           <button class="small" onclick={() => layoutOp("go-to-page", layout!.path.length > 1 ? layout!.path[layout!.path.length - 2].id : layout!.top_page)}>← Back</button>
@@ -880,7 +1001,7 @@
     {#if action === "folder"}
       <label>Folder name <input value={st.name ?? ""} onchange={(e) => save({ name: e.currentTarget.value })} /></label>
       <button class="primary" onclick={() => layoutOp("go-to-page", st.page)}>Open folder</button>
-      <p class="muted small">Its keys get their own page, with a Back key on key 1. Double-click the folder key to open it too.</p>
+      <p class="muted small">Its keys get their own page, with a Back key on key 1.</p>
     {:else if action === "go-to-page"}
       <label>Page
         <select value={st.page ?? 1} onchange={(e) => save({ page: Number(e.currentTarget.value) })}>
@@ -904,9 +1025,9 @@
       <label>Web address <input value={st.url ?? ""} placeholder="https://" onchange={(e) => save({ url: e.currentTarget.value })} /></label>
     {:else if action === "hotkey"}
       <label>Keys
-        <input class="hotkey" value={st.keys ?? ""} placeholder="Click here, then press the keys" readonly onkeydown={(e) => recordHotkey(e, save)} />
+        <input class="hotkey" value={st.keys ?? ""} placeholder="Click here, then press the keys" readonly aria-describedby="hotkey-help" onkeydown={(e) => recordHotkey(e, save)} />
       </label>
-      <p class="muted small">Press the combination, such as Ctrl+Shift+M. Backspace clears it.</p>
+      <p class="muted small" id="hotkey-help">Press the combination, such as Ctrl+Shift+M. Backspace clears it.</p>
     {:else if action === "text"}
       <label>Text <textarea rows="4" value={st.text ?? ""} onchange={(e) => save({ text: e.currentTarget.value })}></textarea></label>
       <label class="check"><input type="checkbox" checked={!!st.enter} onchange={(e) => save({ enter: e.currentTarget.checked })} /> Press Enter afterwards</label>
@@ -1037,11 +1158,17 @@
         <div class="meander"></div>
         <div class="hero-body">
           <div>
-            <h1>Agora</h1>
-            <p class="tagline">The marketplace for your Stream Dock.</p>
+            <h1>{status.model_name}</h1>
+            <p class="tagline">Keys, pages and plugins for your Stream Dock.</p>
             <span class="pill big" class:off={!status.connected}>{status.message || (status.connected ? "Connected" : "Not connected")}</span>
             {#if !status.connected}
               <p class="muted hint">Agora keeps looking and connects by itself as soon as the dock is free.</p>
+            {/if}
+            {#if layout}
+              <dl class="now">
+                <dt>Profile</dt><dd>{layout.profiles.find((p) => p.id === layout!.profile)?.name}</dd>
+                <dt>Page</dt><dd>{pageName}</dd>
+              </dl>
             {/if}
           </div>
           <div class="hero-dock">
@@ -1052,8 +1179,8 @@
 
       <div class="cards">
         <button class="card" onclick={() => (page = "keys")}>
-          <span class="card-num">{usedKeys}<small>/{keyCount}</small></span>
-          <span class="card-label">Keys set up</span>
+          <span class="card-num">{usedKeys}<small>/{allSlots.length}</small></span>
+          <span class="card-label">{allSlots.length > keyCount ? "Keys, buttons and knobs set up" : "Keys set up"} on this page</span>
           <span class="card-go">Edit keys</span>
         </button>
         <button class="card" onclick={() => (page = "plugins")}>
@@ -1071,17 +1198,24 @@
         </button>
       </div>
 
-      <section class="log">
-        <h2>Activity</h2>
-        {@render activity(12)}
-      </section>
+      {#if vsdFound > 0 && !vsdOfferHidden}
+        <section class="offer">
+          <div>
+            <h2>Bring your keys over from VSD Craft</h2>
+            <p class="muted">Agora found {vsdFound} VSD Craft {vsdFound === 1 ? "profile" : "profiles"} for this dock. Importing copies them into Agora and leaves VSD Craft's files as they are.</p>
+          </div>
+          <div class="row">
+            <button class="primary" onclick={startImport}>Import from VSD Craft</button>
+            <button onclick={hideVsdOffer}>Not now</button>
+          </div>
+        </section>
+      {/if}
     {:else if page === "keys"}
       <div class="keys-page">
         <section class="device">
           <div class="meander"></div>
           {@render pageBar()}
           {@render keyGrid(true)}
-          {#if error}<p class="error">{error}</p>{/if}
         </section>
 
         <section class="side">
@@ -1096,10 +1230,15 @@
             {#if Object.keys(keyInfos).length > 0}
               <div class="key-list">
                 {#each Object.values(keyInfos) as ki (ki.key)}
-                  <button class="key-row" onclick={() => loadKey(ki.key)}>
-                    {#if previews[ki.key]}<img src={previews[ki.key]} alt="" />{:else}<span class="noicon"></span>{/if}
-                    <span class="key-row-text"><b><span class="k">{slotName(ki.key)}</span> · {ki.name}</b><span class="muted small">{ki.plugin_name}</span></span>
-                  </button>
+                  <div class="key-row-wrap">
+                    <button class="key-row" onclick={() => loadKey(ki.key)}>
+                      {#if previews[ki.key]}<img src={previews[ki.key]} alt="" />{:else}<span class="noicon"></span>{/if}
+                      <span class="key-row-text"><b><span class="k">{slotName(ki.key)}</span> · {ki.name}</b><span class="muted small">{ki.plugin_name}</span></span>
+                    </button>
+                    {#if ki.builtin && ki.action === "folder"}
+                      <button class="small" onclick={() => openFolder(ki.key)} aria-label="Open folder {ki.settings.name ?? ''}">Open</button>
+                    {/if}
+                  </div>
                 {/each}
               </div>
             {/if}
@@ -1119,10 +1258,11 @@
           {:else if info}
             <div class="side-head">
               <div>
-                <h2><span class="k">{slotName(selected)}</span> · {info.name}</h2>
+                <h2><span class="k">{slotName(selected)}</span> · <span class="item">{info.name}</span></h2>
                 <div class="muted">{info.plugin_name}</div>
               </div>
               <div class="row">
+                {#if info.builtin && info.action === "folder"}<button onclick={() => openFolder(selected!)}>Open</button>{/if}
                 <button class="primary" onclick={() => (picking = true)}>Change</button>
                 <button class="danger" onclick={removeKey}>Remove</button>
                 <button onclick={() => loadKey(null)} title="Back to the overview (Esc)">All keys</button>
@@ -1154,10 +1294,9 @@
           <input type="checkbox" role="switch" checked={settings.use_vsd_craft_plugins} onchange={(e) => setVsdPlugins(e.currentTarget.checked)} />
           <span>
             Also use plugins installed for VSD Craft
-            <span class="muted small">Read only. Off while Agora is being built and tested.</span>
+            <span class="muted small">Lists the plugins you installed for VSD Craft in Agora too. Agora only reads them and never changes or deletes them.</span>
           </span>
         </label>
-        {#if error}<p class="error">{error}</p>{/if}
         {#if plugins.length === 0}
           <p class="horos"><b>ΗΟΡΟΣ ΕΙΜΙ ΤΕΣ ΑΓΟΡΑΣ</b>"I am the boundary of the Agora." No plugins yet: put plugin folders (name.sdPlugin) in Agora's plugins folder.</p>
         {/if}
@@ -1175,15 +1314,11 @@
               {#if p.hidden}
                 <button class="small" onclick={() => showPlugin(p)}>Show</button>
               {:else if p.source === "Agora"}
-                <button class="small danger" class:sure={confirming === p.uuid} onclick={() => removePlugin(p)}
-                  title="Moves the plugin to the Recycle Bin and clears its keys"
-                  >{confirming === p.uuid ? "Sure? Delete" : "Delete"}</button
-                >
+                <button class="small danger" onclick={() => removePlugin(p)}
+                  title="Moves the plugin to the Recycle Bin and clears its keys. You can undo it for a few seconds.">Delete</button>
               {:else}
-                <button class="small" class:sure={confirming === p.uuid} onclick={() => removePlugin(p)}
-                  title="VSD Craft's plugins are never deleted by Agora. Hiding takes it out of the action list and clears its keys."
-                  >{confirming === p.uuid ? "Sure? Hide" : "Hide"}</button
-                >
+                <button class="small" onclick={() => removePlugin(p)}
+                  title="VSD Craft's plugins are never deleted by Agora. Hiding takes it out of the action list and clears its keys.">Hide</button>
               {/if}
             </div>
           </div>
@@ -1197,7 +1332,7 @@
       <div class="dock-page">
         <section class="screen-card">
           <h2>Screen</h2>
-          <p class="muted small">{status.model_name}{status.connected ? "" : " (last connected)"}{status.tested ? "" : ". Agora hasn't been tried on this model yet; tell us what works and what doesn't."}</p>
+          <p class="muted small">{status.model_name}{status.connected ? "" : " (last connected)"}{#if !status.tested}. Agora hasn't been tried on this model yet. <button class="link" onclick={() => call("open_link", { which: "issues" })}>Tell us what works and what doesn't</button>.{/if}</p>
           <label class="slider">
             <span>Key brightness <b>{settings.brightness}%</b></span>
             <input
@@ -1277,8 +1412,6 @@
               onchange={() => call("set_ring_brightness", { percent: settings.ring_brightness })}
             />
           </label>
-          {#if notice}<p class="muted small">{notice}</p>{/if}
-          {#if error}<p class="error">{error}</p>{/if}
         </section>
         {/if}
 
@@ -1299,5 +1432,21 @@
         </section>
       </div>
     {/if}
+    <div class="statusbar" class:empty={!error && !toast && !notice}>
+      {#if error}
+        <div class="error-line" role="alert">
+          <span>{error}</span>
+          <button class="small" onclick={() => (error = "")} aria-label="Dismiss">×</button>
+        </div>
+      {/if}
+      <div class="status-line" role="status" aria-live="polite">
+        {#if toast}
+          <span>{toast.text}</span>
+          <button class="small" onclick={undoToast}>Undo</button>
+        {:else if notice}
+          <span class="muted">{notice}</span>
+        {/if}
+      </div>
+    </div>
   </main>
 </div>

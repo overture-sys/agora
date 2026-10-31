@@ -193,6 +193,15 @@ pub struct LayoutView {
     pub apps: Vec<String>,
 }
 
+/// Everything the editor shows for the page in front: profiles and pages,
+/// and what's on each key, button and knob. One question instead of one per
+/// place, so a page change doesn't queue a burst behind the dock's redraw.
+#[derive(Debug, Clone, Serialize)]
+pub struct PageOverview {
+    pub layout: LayoutView,
+    pub keys: Vec<KeyInfo>,
+}
+
 /// What a VSD Craft import brought in.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
@@ -348,7 +357,7 @@ impl Profile {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Layout {
     #[serde(default)]
     profiles: Vec<Profile>,
@@ -545,6 +554,7 @@ pub(crate) enum Msg {
     SetSettings(usize, Value),
     SetLook(usize, Look),
     View(oneshot::Sender<LayoutView>),
+    Overview(oneshot::Sender<PageOverview>),
     Foreground(String),
     ImportVsd(Vec<PathBuf>, oneshot::Sender<Result<ImportReport, String>>),
     Layout(LayoutOp, oneshot::Sender<Result<(), String>>),
@@ -552,6 +562,8 @@ pub(crate) enum Msg {
     AllFaces(bool),
     /// The rest of a multi-action, after a pause.
     Steps(Vec<Value>),
+    /// Puts back what the last removal took away.
+    Undo(oneshot::Sender<bool>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -609,6 +621,7 @@ impl HostHandle {
             shown: HashMap::new(),
             down: HashMap::new(),
             auto_from: None,
+            undo: None,
         };
         runtime.spawn(state.run(rx));
         tx.send(Msg::AllFaces(true)).ok();
@@ -632,6 +645,12 @@ impl HostHandle {
 
     pub fn clear(&self, key: usize) {
         let _ = self.tx.send(Msg::Clear(key));
+    }
+
+    /// Undoes the last removal of a key, page, profile or plugin, if nothing
+    /// else changed since. Returns whether there was one to undo.
+    pub fn undo(&self) -> bool {
+        self.ask(Msg::Undo).unwrap_or(false)
     }
 
     /// Hides a plugin from the action list (or shows it again). Hiding
@@ -706,6 +725,11 @@ impl HostHandle {
         self.ask(Msg::View)
     }
 
+    /// The layout and every place's action on the page in front, in one go.
+    pub fn overview(&self) -> Option<PageOverview> {
+        self.ask(Msg::Overview)
+    }
+
     /// Brings VSD Craft profiles (their folders) in as new profiles.
     pub fn import_vsd(&self, dirs: Vec<PathBuf>) -> Result<ImportReport, String> {
         self.ask(|o| Msg::ImportVsd(dirs, o))
@@ -772,6 +796,9 @@ struct State {
     /// While an app has brought its profile up: the profile to go back to
     /// when another app comes to the front.
     auto_from: Option<String>,
+    /// The layout as it was before the last removal (a key, page, profile
+    /// or plugin), until something else changes.
+    undo: Option<Layout>,
 }
 
 fn layout_path(dir: &std::path::Path) -> PathBuf {
@@ -871,7 +898,38 @@ impl State {
     }
 
     fn handle(&mut self, msg: Msg) {
+        // A removal can be undone until something else changes the layout.
+        match &msg {
+            Msg::Clear(_)
+            | Msg::SetHidden(_, true)
+            | Msg::Layout(LayoutOp::RemovePage(_) | LayoutOp::RemoveProfile(_), _) => {
+                self.undo = Some(self.layout.clone());
+            }
+            Msg::Place(..)
+            | Msg::Move(..)
+            | Msg::SetHidden(_, false)
+            | Msg::Forget(..)
+            | Msg::SetSettings(..)
+            | Msg::SetLook(..)
+            | Msg::ImportVsd(..)
+            | Msg::Layout(..) => self.undo = None,
+            _ => {}
+        }
         match msg {
+            Msg::Undo(done) => {
+                let Some(before) = self.undo.take() else {
+                    let _ = done.send(false);
+                    return;
+                };
+                self.leave_page();
+                self.layout = before;
+                self.layout.fix();
+                self.dirty = true;
+                self.enter_page();
+                self.stop_unused();
+                self.emit(HostEvent::PageChanged);
+                let _ = done.send(true);
+            }
             Msg::SocketOpen(id, tx) => {
                 self.conns.insert(
                     id,
@@ -958,6 +1016,10 @@ impl State {
             Msg::View(done) => {
                 let _ = done.send(self.layout.view());
             }
+            Msg::Overview(done) => {
+                let keys = self.all_slots().filter_map(|k| self.key_info(k)).collect();
+                let _ = done.send(PageOverview { layout: self.layout.view(), keys });
+            }
             Msg::Foreground(app) => self.on_foreground(&app),
             Msg::ImportVsd(dirs, done) => {
                 let r = self.import_vsd(&dirs);
@@ -1027,6 +1089,14 @@ impl State {
             // Knobs number from the left in a row of their own, as on Elgato's.
             Slot::Dial => json!({ "column": key - DIAL_BASE, "row": 0 }),
         }
+    }
+
+    /// Every key, button and knob this dock has.
+    fn all_slots(&self) -> impl Iterator<Item = usize> {
+        let d = &self.config.device;
+        (0..d.rows * d.columns)
+            .chain(BUTTON_BASE..BUTTON_BASE + d.buttons)
+            .chain(DIAL_BASE..DIAL_BASE + d.dials)
     }
 
     /// Whether this dock has the key, button or knob.

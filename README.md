@@ -22,6 +22,7 @@ Your keys, profiles and settings live in `%APPDATA%\Agora` and are kept when you
 - **Agora's own actions:** open an app, file or folder; website; hotkey (press the keys to record them); type text; media keys; dock brightness; light ring; next, previous or go to page; switch profile; folder.
 - **Multi-actions:** run several actions in order with pauses, a Toggle that alternates between two lists, and a Knob action for turning left, turning right and pressing.
 - **Plugins:** runs Stream Dock plugins unchanged (Node.js, HTML and .exe plugins), with their own settings panels. Knob actions get dial turns, presses and strip taps. Tested with Winged Keys and Shannon Keys.
+- **Undo:** removing a key, page, profile or plugin can be undone for a few seconds (Undo, or Ctrl+Z).
 - **Dock:** screen brightness, the M18's light ring (one colour, or paint it light by light), start with Windows.
 - **VSD Craft import:** brings in your M18 profiles from VSD Craft. Agora only reads VSD Craft's files and never changes them.
 

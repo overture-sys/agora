@@ -619,3 +619,41 @@ fn plugins_hear_knobs() {
         |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "tap"),
     );
 }
+
+#[test]
+fn removals_can_be_undone_until_something_else_changes() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, _rx) = start(data.path());
+
+    // A removed key comes back with its settings.
+    host.place(2, builtin::PLUGIN, builtin::NEXT_PAGE).unwrap();
+    host.clear(2);
+    assert!(host.key_info(2).is_none());
+    assert!(host.undo());
+    assert_eq!(host.key_info(2).unwrap().action, builtin::NEXT_PAGE);
+    // Only once.
+    assert!(!host.undo());
+
+    // A removed page comes back, keys and all.
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    let second = host.layout().unwrap().page.clone();
+    host.place(4, builtin::PLUGIN, builtin::PREVIOUS_PAGE).unwrap();
+    host.layout_op(LayoutOp::RemovePage(second.clone())).unwrap();
+    assert_eq!(host.layout().unwrap().pages.len(), 1);
+    assert!(host.undo());
+    let view = host.layout().unwrap();
+    assert_eq!(view.pages.len(), 2);
+    assert_eq!(view.page, second);
+    assert!(host.key_info(4).is_some());
+
+    // Anything else in between ends the chance to undo.
+    host.clear(4);
+    host.place(5, builtin::PLUGIN, builtin::NEXT_PAGE).unwrap();
+    assert!(!host.undo());
+    assert!(host.key_info(4).is_none());
+
+    // One call answers for the whole page.
+    let o = host.overview().unwrap();
+    assert_eq!(o.layout.page, second);
+    assert_eq!(o.keys.iter().map(|k| k.key).collect::<Vec<_>>(), vec![5]);
+}

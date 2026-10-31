@@ -157,12 +157,21 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
     };
 
     loop {
+        // Take everything queued, so a burst (a page change) goes out back
+        // to back and a key redrawn twice in it is only sent once.
+        let mut cmds = Vec::new();
         loop {
-            let cmd = match rx.try_recv() {
-                Ok(c) => c,
+            match rx.try_recv() {
+                Ok(c) => cmds.push(c),
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => Command::Shutdown,
-            };
+                Err(TryRecvError::Disconnected) => {
+                    cmds.push(Command::Shutdown);
+                    break;
+                }
+            }
+        }
+        let busy = !cmds.is_empty();
+        for cmd in coalesce(cmds) {
             let result = match cmd {
                 Command::SetKeyJpeg(k, jpeg) => dock.set_key_jpeg(k, &jpeg),
                 Command::SetStripJpeg(s, jpeg) => dock.set_strip_jpeg(s, &jpeg),
@@ -203,7 +212,8 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
             next_keepalive = Instant::now() + interval;
         }
 
-        match dock.read_event(20) {
+        // Don't sit waiting for input while pictures are still coming in.
+        match dock.read_event(if busy { 0 } else { 20 }) {
             Ok(Some(ev)) => {
                 if events.send(Event::Input(ev)).is_err() {
                     stop(&mut dock, ring_used);
@@ -220,11 +230,48 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
     }
 }
 
+/// Drops pictures that a later one in the same batch replaces.
+fn coalesce(cmds: Vec<Command>) -> Vec<Command> {
+    let target = |c: &Command| match c {
+        Command::SetKeyJpeg(k, _) => Some((0, *k)),
+        Command::SetStripJpeg(s, _) => Some((1, *s)),
+        _ => None,
+    };
+    let mut out: Vec<Command> = Vec::with_capacity(cmds.len());
+    for c in cmds {
+        if let Some(t) = target(&c) {
+            out.retain(|o| target(o) != Some(t));
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::FakeTransport;
     use crate::{models, Control, StreamDock};
+
+    #[test]
+    fn a_key_drawn_twice_in_a_burst_is_sent_once() {
+        let out = coalesce(vec![
+            Command::SetKeyJpeg(0, vec![1]),
+            Command::Brightness(50),
+            Command::SetKeyJpeg(1, vec![2]),
+            Command::SetKeyJpeg(0, vec![3]),
+            Command::SetStripJpeg(0, vec![4]),
+        ]);
+        let keys: Vec<(usize, u8)> = out
+            .iter()
+            .filter_map(|c| match c {
+                Command::SetKeyJpeg(k, j) => Some((*k, j[0])),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, [(1, 2), (0, 3)]);
+        assert_eq!(out.len(), 4);
+    }
 
     #[test]
     fn worker_reports_presses_and_closes_on_drop() {

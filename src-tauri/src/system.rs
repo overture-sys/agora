@@ -130,10 +130,11 @@ pub fn open(path: &str, args: &str) -> Result<(), String> {
         return Err("No app or file chosen".into());
     }
     let p = std::path::Path::new(path);
-    let program = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+    // "shell:AppsFolder\..." names a Start menu app; only Explorer opens those.
+    let program = !path.to_ascii_lowercase().starts_with("shell:")
+        && p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"));
     let result = if program {
         let mut cmd = std::process::Command::new(p);
         cmd.args(split_args(args));

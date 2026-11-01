@@ -27,6 +27,8 @@ pub const NEXT_PAGE: &str = "next-page";
 pub const PREVIOUS_PAGE: &str = "previous-page";
 pub const GO_TO_PAGE: &str = "go-to-page";
 pub const SWITCH_PROFILE: &str = "switch-profile";
+/// Shows "page n / m"; a press goes to the next page.
+pub const PAGE_INDICATOR: &str = "page-indicator";
 pub const MULTI: &str = "multi";
 pub const TOGGLE: &str = "toggle";
 /// A pause between multi-action steps; only inside multi-actions.
@@ -84,10 +86,19 @@ pub static DEFS: &[Def] = &[
         navigation: true,
     },
     Def {
+        id: PAGE_INDICATOR,
+        name: "Page indicator",
+        group: "Navigation",
+        tooltip: "Shows which page you're on; press it for the next page",
+        icon: r##"<rect x="18" y="14" width="36" height="44" rx="3" S/><circle cx="29" cy="36" r="2" S/><circle cx="36" cy="36" r="2" S/><circle cx="43" cy="36" r="2" S/>"##,
+        settings: || json!({}),
+        navigation: true,
+    },
+    Def {
         id: SWITCH_PROFILE,
         name: "Switch profile",
         group: "Navigation",
-        tooltip: "Changes to another profile",
+        tooltip: "Changes to another profile, or the next or previous one",
         icon: r##"<rect x="12" y="16" width="30" height="22" rx="3" S/><rect x="30" y="34" width="30" height="22" rx="3" S/>"##,
         settings: || json!({ "profile": "" }),
         navigation: true,

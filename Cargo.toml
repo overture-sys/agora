@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/agora-device", "crates/agora-host", "crates/agora-m18", "src-tauri"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 license = "MIT"
 authors = ["overture-sys"]

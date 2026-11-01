@@ -227,15 +227,51 @@ impl Reader<'_> {
         let st = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let mut folder = None;
         let mut switch_to = None;
+        let mut app_icon = None;
         let (plugin, action, settings) = match uuid {
             "com.hotspot.streamdock.page.previous" => {
                 builtin_key(builtin::PREVIOUS_PAGE, json!({}))
             }
             "com.hotspot.streamdock.page.next" => builtin_key(builtin::NEXT_PAGE, json!({})),
             "com.hotspot.streamdock.profile.backtoparent" => builtin_key(builtin::BACK, json!({})),
-            "com.hotspot.streamdock.profile.rotate" => {
-                switch_to = Some(st("ProfileUUID"));
-                builtin_key(builtin::SWITCH_PROFILE, json!({ "profile": "" }))
+            "com.hotspot.streamdock.profile.rotate" => match st("ProfileUUID").as_str() {
+                // VSD Craft's "previous scene" and, with no profile chosen, the next one.
+                "PreviousScene" => {
+                    builtin_key(builtin::SWITCH_PROFILE, json!({ "profile": "previous" }))
+                }
+                "" => builtin_key(builtin::SWITCH_PROFILE, json!({ "profile": "next" })),
+                id => {
+                    switch_to = Some(id.to_string());
+                    builtin_key(builtin::SWITCH_PROFILE, json!({ "profile": "" }))
+                }
+            },
+            "com.hotspot.streamdock.page.indicator" => {
+                builtin_key(builtin::PAGE_INDICATOR, json!({}))
+            }
+            "com.hotspot.streamdock.system.openApps" => {
+                let app = s
+                    .get("appId")
+                    .and_then(Value::as_u64)
+                    .and_then(|i| s.get("applications")?.get(i as usize))
+                    .cloned();
+                let Some(app) = app else {
+                    self.skipped.push(format!("{name} (no app chosen)"));
+                    return None;
+                };
+                let path = app.get("path").and_then(Value::as_str).unwrap_or("");
+                if path.is_empty() {
+                    self.skipped.push(format!("{name} (no app chosen)"));
+                    return None;
+                }
+                app_icon = app
+                    .get("image")
+                    .and_then(Value::as_str)
+                    .and_then(|i| self.app_image(i));
+                // The Start menu's own name for the app, which Explorer can open.
+                builtin_key(
+                    "open",
+                    json!({ "path": format!("shell:AppsFolder\\{path}"), "args": "" }),
+                )
             }
             "com.hotspot.streamdock.profile.openchild" => {
                 let sub = self.root.join("profiles").join(st("ProfileUUID"));
@@ -333,7 +369,7 @@ impl Reader<'_> {
                 .filter(|a| matches!(a.as_str(), "top" | "middle" | "bottom")),
             color: get("TitleColor").filter(|c| c.starts_with('#')),
             font_size,
-            icon: get("Image").and_then(|i| image(dir, &i)),
+            icon: get("Image").and_then(|i| image(dir, &i)).or(app_icon),
             folder,
             switch_to,
         })
@@ -372,6 +408,33 @@ impl Reader<'_> {
             }
         }
         out
+    }
+}
+
+impl Reader<'_> {
+    /// An app's picture from VSD Craft's images folder. The path is stored
+    /// whole; the file is looked for there and next to the profiles.
+    fn app_image(&self, stored: &str) -> Option<String> {
+        let file = stored.rsplit(['\\', '/']).next()?;
+        let root = self.root.parent()?.parent()?;
+        let near = root.join("images").join("appsImage").join(file);
+        let path = if near.is_file() {
+            near
+        } else {
+            PathBuf::from(stored)
+        };
+        let mime = match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => return None,
+        };
+        let bytes = std::fs::read(&path).ok()?;
+        Some(format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
     }
 }
 
@@ -557,5 +620,48 @@ mod tests {
         assert!(keys[&(BUTTON_BASE + 1)].action == builtin::NEXT_PAGE);
         let (_, skipped) = read(&p, 5, 3, 0, &known).unwrap();
         assert!(skipped.iter().any(|s| s.contains("not on this dock")));
+    }
+
+    #[test]
+    fn reads_scene_shift_page_indicator_and_open_apps() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("profiles").join("BBB.sdProfile");
+        std::fs::create_dir_all(&p).unwrap();
+        let images = dir.path().join("images").join("appsImage");
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("app.png"), b"png").unwrap();
+        std::fs::write(
+            p.join("manifest.json"),
+            json!({
+                "Name": "Shift", "DeviceUUID": "VSDM18",
+                "Actions": {
+                    "5,0": { "UUID": "com.hotspot.streamdock.profile.rotate", "Settings": { "ProfileUUID": "PreviousScene" } },
+                    "5,1": { "UUID": "com.hotspot.streamdock.profile.rotate", "Settings": { "ProfileUUID": "OTHER" } },
+                    "5,2": { "UUID": "com.hotspot.streamdock.profile.rotate", "Settings": { "ProfileUUID": "" } },
+                    "4,2": { "UUID": "com.hotspot.streamdock.page.indicator", "Name": "Page Indicator" },
+                    "0,0": { "UUID": "com.hotspot.streamdock.system.openApps", "Name": "OpenApps", "Settings": { "appId": 1, "applications": [
+                        { "name": "A", "path": "a.exe", "image": "C:\\x\\a.png" },
+                        { "name": "Notes", "path": "md.obsidian", "image": "C:\\StreamDock\\images\\appsImage\\app.png" }
+                    ] } }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (prof, skipped) = read(&p, 5, 3, 3, &|_| None).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let keys: HashMap<usize, &ReadKey> =
+            prof.pages[0].keys.iter().map(|(k, v)| (*k, v)).collect();
+        assert_eq!(keys[&BUTTON_BASE].settings["profile"], "previous");
+        assert_eq!(keys[&(BUTTON_BASE + 1)].switch_to.as_deref(), Some("OTHER"));
+        assert_eq!(keys[&(BUTTON_BASE + 2)].settings["profile"], "next");
+        assert_eq!(keys[&14].action, builtin::PAGE_INDICATOR);
+        assert_eq!(keys[&0].action, "open");
+        assert_eq!(keys[&0].settings["path"], "shell:AppsFolder\\md.obsidian");
+        assert!(keys[&0]
+            .icon
+            .as_deref()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
     }
 }

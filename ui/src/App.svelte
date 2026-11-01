@@ -1052,6 +1052,8 @@
       <label>Profile
         <select value={st.profile ?? ""} onchange={(e) => save({ profile: e.currentTarget.value })}>
           <option value="" disabled>Choose a profile</option>
+          <option value="next">Next profile</option>
+          <option value="previous">Previous profile</option>
           {#each layout?.profiles ?? [] as p}<option value={p.id}>{p.name}</option>{/each}
         </select>
       </label>

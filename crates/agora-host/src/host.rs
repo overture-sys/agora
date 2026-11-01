@@ -1018,7 +1018,10 @@ impl State {
             }
             Msg::Overview(done) => {
                 let keys = self.all_slots().filter_map(|k| self.key_info(k)).collect();
-                let _ = done.send(PageOverview { layout: self.layout.view(), keys });
+                let _ = done.send(PageOverview {
+                    layout: self.layout.view(),
+                    keys,
+                });
             }
             Msg::Foreground(app) => self.on_foreground(&app),
             Msg::ImportVsd(dirs, done) => {
@@ -1119,7 +1122,8 @@ impl State {
                     .get(&i.plugin)
                     .and_then(|p| p.action(&i.action))
                     .is_some_and(|a| {
-                        !a.controllers.is_empty() && a.controllers.iter().all(|c| c == "Information")
+                        !a.controllers.is_empty()
+                            && a.controllers.iter().all(|c| c == "Information")
                     })
             });
             return if info_only { "Information" } else { "Keypad" };
@@ -1245,6 +1249,16 @@ impl State {
         } else {
             self.plugin_face(&inst)
         };
+        if inst.plugin == BUILTIN && inst.action == builtin::PAGE_INDICATOR {
+            let profile = self.layout.profile();
+            let tops: Vec<String> = profile.top_pages().map(|p| p.id.clone()).collect();
+            let top = profile.top_of(&profile.current);
+            let at = tops.iter().position(|p| *p == top).unwrap_or(0);
+            face.title = format!("{} / {}", at + 1, tops.len().max(1));
+            face.align = "middle".into();
+            face.font_size = 16.0;
+            face.image = None;
+        }
         let look = &inst.look;
         if let Some(t) = &look.title {
             face.title = t.clone();
@@ -1448,7 +1462,9 @@ impl State {
             "Encoder" => a.controllers.iter().any(|c| c == "Encoder" || c == "Knob"),
             _ => {
                 a.controllers.is_empty()
-                    || a.controllers.iter().any(|c| c == "Keypad" || c == "Information")
+                    || a.controllers
+                        .iter()
+                        .any(|c| c == "Keypad" || c == "Information")
             }
         }
     }
@@ -1795,7 +1811,9 @@ impl State {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             builtin::BACK => self.layout.page().parent.clone(),
-            builtin::NEXT_PAGE => Some(tops[(at + 1) % tops.len()].clone()),
+            builtin::NEXT_PAGE | builtin::PAGE_INDICATOR => {
+                Some(tops[(at + 1) % tops.len()].clone())
+            }
             builtin::PREVIOUS_PAGE => Some(tops[(at + tops.len() - 1) % tops.len()].clone()),
             builtin::GO_TO_PAGE => {
                 let n = inst
@@ -1812,6 +1830,18 @@ impl State {
                     .get("profile")
                     .and_then(Value::as_str)
                     .unwrap_or("");
+                let ids: Vec<String> = self.layout.profiles.iter().map(|p| p.id.clone()).collect();
+                let here = ids
+                    .iter()
+                    .position(|p| *p == self.layout.active)
+                    .unwrap_or(0);
+                let id = match id {
+                    "next" if !ids.is_empty() => ids[(here + 1) % ids.len()].as_str(),
+                    "previous" if !ids.is_empty() => {
+                        ids[(here + ids.len() - 1) % ids.len()].as_str()
+                    }
+                    other => other,
+                };
                 if self.layout.profiles.iter().any(|p| p.id == id) {
                     self.auto_from = None;
                     self.switch_profile(id);
@@ -1906,8 +1936,15 @@ impl State {
             read.push(p);
         }
         // New ids first, so Scene Shift keys can point at each other.
-        let ids: HashMap<String, String> =
-            read.iter().map(|p| (p.id.clone(), new_context())).collect();
+        // Keyed by folder name and by the bare id Scene Shift keys store.
+        let mut ids: HashMap<String, String> = HashMap::new();
+        for p in &read {
+            let id = new_context();
+            if let Some(bare) = p.id.strip_suffix(".sdProfile") {
+                ids.insert(bare.to_string(), id.clone());
+            }
+            ids.insert(p.id.clone(), id);
+        }
         let mut report = ImportReport {
             profiles: Vec::new(),
             keys: 0,
@@ -2234,7 +2271,9 @@ impl State {
                 // "Information" actions only show something; on a Stream
                 // Dock they go on a key like any other.
                 if a.controllers.is_empty()
-                    || a.controllers.iter().any(|c| c == "Keypad" || c == "Information")
+                    || a.controllers
+                        .iter()
+                        .any(|c| c == "Keypad" || c == "Information")
                 {
                     controllers.push("Keypad".to_string());
                 }
@@ -2593,12 +2632,7 @@ impl State {
                 self.redraw(k);
             }
             // Elgato-only extras: accepted quietly so plugins that use them keep working.
-            (
-                "setFeedback"
-                | "setFeedbackLayout"
-                | "setTriggerDescription",
-                _,
-            ) => {}
+            ("setFeedback" | "setFeedbackLayout" | "setTriggerDescription", _) => {}
             (other, _) => self.log(uuid, format!("Ignored event '{other}'")),
         }
     }

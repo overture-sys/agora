@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2 beta (2026-11-01)
+
+- VSD Craft import brings over more keys: Open Apps (opened through the Start menu, with the app's picture), Page Indicator, and round buttons set to the previous or next scene.
+- New Page indicator key: shows "page n / m" and goes to the next page when pressed.
+- Switch profile can now go to the next or previous profile.
+- Fixed: imported Scene Shift keys that point at another imported profile now switch to it.
+
 ## 0.6.1 beta (2026-10-31)
 - Light or dark: choose Like Windows, Light or Dark on the Dock page, or flip it with the sun/moon button at the foot of the side bar. Agora remembers it, and the window's title bar follows.
 

@@ -74,6 +74,11 @@ pub enum HostEvent {
         key: usize,
         face: Face,
     },
+    /// A built-in key was pressed: play its press bounce with this face.
+    Pressed {
+        key: usize,
+        face: Face,
+    },
     /// Open a web page in the browser (http/https only; checked by the host).
     OpenUrl(String),
     /// Start an HTML plugin in a hidden browser view at this address.
@@ -1815,6 +1820,13 @@ impl State {
         }
         self.down.insert(key, inst.context.clone());
         if inst.plugin == BUILTIN {
+            // The bounce goes out first, so a face the action changes
+            // (a new page, a toggle) arrives after it and stops it.
+            if let Some(face) = self.shown.get(&key).cloned() {
+                if face != Face::default() {
+                    self.emit(HostEvent::Pressed { key, face });
+                }
+            }
             self.run_builtin(&inst);
         } else {
             self.send_instance(key, "keyDown", json!({}));

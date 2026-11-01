@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2 beta (2026-11-01)
+
+- Agora's built-in keys give a quick bounce on the dock when you press them.
+
 ## 0.7.1 beta (2026-11-01)
 
 - Right-click a key to edit it or remove it (Remove key can be undone with Undo or Ctrl+Z).

@@ -165,6 +165,12 @@ pub fn face_svg(face: &Face) -> String {
 /// Renders a face at `size` x `size` pixels. A plugin image that can't be
 /// read leaves the key black rather than failing.
 pub fn render(face: &Face, size: u32) -> DynamicImage {
+    render_scaled(face, size, 1.0)
+}
+
+/// Renders a face shrunk or grown by `zoom` around the key's centre, on
+/// black. Used for the little bounce a built-in key gives when pressed.
+pub fn render_scaled(face: &Face, size: u32, zoom: f32) -> DynamicImage {
     let svg = face_svg(face);
     let opts = usvg::Options {
         fontdb: fontdb(),
@@ -172,10 +178,11 @@ pub fn render(face: &Face, size: u32) -> DynamicImage {
     };
     let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("non-zero key size");
     if let Ok(tree) = usvg::Tree::from_str(&svg, &opts) {
-        let scale = size as f32 / 72.0;
+        let scale = size as f32 / 72.0 * zoom;
+        let shift = size as f32 * (1.0 - zoom) / 2.0;
         resvg::render(
             &tree,
-            tiny_skia::Transform::from_scale(scale, scale),
+            tiny_skia::Transform::from_scale(scale, scale).post_translate(shift, shift),
             &mut pixmap.as_mut(),
         );
     }
@@ -233,6 +240,17 @@ mod tests {
         assert!(svg.contains(r##"fill="#ffffff""##));
         assert_eq!(svg.matches("<text").count(), 2);
         usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
+    }
+
+    #[test]
+    fn shrunk_face_leaves_black_edges() {
+        let face = Face {
+            image: Some(format!("data:image/svg+xml;base64,{}", B64.encode(RED_SVG))),
+            ..Default::default()
+        };
+        let img = render_scaled(&face, 72, 0.8).to_rgba8();
+        assert_eq!(img.get_pixel(36, 36).0[0], 255);
+        assert_eq!(img.get_pixel(1, 1).0[..3], [0, 0, 0]);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agora_device::keyimage;
 use agora_device::worker::{Command, DockWorker, Event};
@@ -875,6 +875,60 @@ fn html_plugin_label(plugin: &str) -> String {
     format!("plugin-{safe}")
 }
 
+/// How many times each key's face has been replaced, so a press bounce
+/// stops as soon as the key gets a newer face.
+fn face_gens() -> &'static Mutex<HashMap<usize, u64>> {
+    static GENS: std::sync::OnceLock<Mutex<HashMap<usize, u64>>> = std::sync::OnceLock::new();
+    GENS.get_or_init(Default::default)
+}
+
+/// Sizes for the press bounce: the icon sinks in, then springs back
+/// slightly past full size. About a quarter of a second in all.
+const BOUNCE: [f32; 7] = [0.88, 0.82, 0.86, 0.95, 1.03, 1.01, 1.0];
+const BOUNCE_FRAME: Duration = Duration::from_millis(35);
+
+/// Plays the press bounce on a built-in key, on its own thread.
+fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
+    let (model, connected) = {
+        let dock = shared.lock().unwrap();
+        (dock.current_model(), dock.worker.is_some())
+    };
+    let Some(screen) = model.keys.get(key).copied() else {
+        return;
+    };
+    if !connected {
+        return;
+    }
+    let start = face_gens().lock().unwrap().get(&key).copied().unwrap_or(0);
+    let shared = shared.clone();
+    let _ = std::thread::Builder::new()
+        .name("agora-bounce".into())
+        .spawn(move || {
+            for zoom in BOUNCE {
+                let begun = Instant::now();
+                let img = face::render_scaled(&f, screen.width, zoom);
+                let Ok(jpeg) =
+                    keyimage::to_jpeg(&img, screen.width, screen.height, model.orientation)
+                else {
+                    return;
+                };
+                {
+                    let gens = face_gens().lock().unwrap();
+                    if gens.get(&key).copied().unwrap_or(0) != start {
+                        return;
+                    }
+                    match shared.lock().unwrap().worker.as_ref() {
+                        Some(w) => {
+                            w.send(Command::SetKeyJpeg(key, jpeg));
+                        }
+                        None => return,
+                    }
+                }
+                std::thread::sleep(BOUNCE_FRAME.saturating_sub(begun.elapsed()));
+            }
+        });
+}
+
 /// Carries out what the host asks: key faces to the dock and the window,
 /// browser pages, HTML plugins, status and logs.
 fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Receiver<HostEvent>) {
@@ -907,9 +961,14 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
                         .ok()
                         .map(|j| Command::SetStripJpeg(d, j));
                 }
-                if let (Some(cmd), true) = (send, connected) {
-                    if let Some(w) = shared.lock().unwrap().worker.as_ref() {
-                        w.send(cmd);
+                {
+                    // A new face ends any press bounce still playing on it.
+                    let mut gens = face_gens().lock().unwrap();
+                    *gens.entry(key).or_default() += 1;
+                    if let (Some(cmd), true) = (send, connected) {
+                        if let Some(w) = shared.lock().unwrap().worker.as_ref() {
+                            w.send(cmd);
+                        }
                     }
                 }
                 let empty = f == face::Face::default();
@@ -923,6 +982,7 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
                 }
                 let _ = app.emit("key-preview", Preview { key, image });
             }
+            HostEvent::Pressed { key, face: f } => press_bounce(&shared, key, f),
             HostEvent::OpenUrl(url) => open_url(&url),
             HostEvent::StartHtmlPlugin { plugin, url } => {
                 let label = html_plugin_label(&plugin);

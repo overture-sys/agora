@@ -168,6 +168,28 @@ pub fn render(face: &Face, size: u32) -> DynamicImage {
     render_scaled(face, size, 1.0)
 }
 
+/// Renders any SVG (with system fonts for text) to a `width` x `height`
+/// picture, scaled to fit. Used for pictures that span the whole dock.
+pub fn render_svg(svg: &str, width: u32, height: u32) -> RgbaImage {
+    let opts = usvg::Options {
+        fontdb: fontdb(),
+        ..Default::default()
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(width.max(1), height.max(1)).expect("non-zero size");
+    if let Ok(tree) = usvg::Tree::from_str(svg, &opts) {
+        let size = tree.size();
+        let scale = (width as f32 / size.width()).min(height as f32 / size.height());
+        let dx = (width as f32 - size.width() * scale) / 2.0;
+        let dy = (height as f32 - size.height() * scale) / 2.0;
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(scale, scale).post_translate(dx, dy),
+            &mut pixmap.as_mut(),
+        );
+    }
+    RgbaImage::from_raw(width.max(1), height.max(1), pixmap.take()).expect("pixmap size")
+}
+
 /// Renders a face shrunk or grown by `zoom` around the key's centre, on
 /// black. Used for the little bounce a built-in key gives when pressed.
 pub fn render_scaled(face: &Face, size: u32, zoom: f32) -> DynamicImage {

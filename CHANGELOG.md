@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.4 beta (2026-11-01)
+
+- Hold for a second action: any key can run its own list of actions when held for half a second; a quick press still runs the key.
+- New keys: Hotkey switch, Random action, Clock, Timer, Stopwatch, Counter, Audio output (next output or a chosen one), App volume, Web request, Run command (PowerShell, can show its output), Snippets (a picker beside the mouse) and Window (next screen, snap, maximise, keep on top).
+- Open keys take the app's own icon when you pick a program.
+- Screen saver on the dock after it sits unused: Matrix rain, the Agora temple, a starfield, a big clock or your own GIF. Any press stops it.
+- Intro: the Agora temple builds itself on the dock when it connects, and in the window when Agora opens. You can play your own video instead, or turn it off.
+
 ## 0.7.3 beta (2026-11-01)
 
 - New app icon: a temple of keys.

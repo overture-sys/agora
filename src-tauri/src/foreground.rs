@@ -45,3 +45,42 @@ pub fn app() -> Option<String> {
 pub fn app() -> Option<String> {
     None
 }
+
+/// The window in front now, to bring back later (0 if none).
+#[cfg(windows)]
+pub fn front_window() -> isize {
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() as isize }
+}
+
+/// Puts a window from [`front_window`] back in front.
+#[cfg(windows)]
+pub fn bring_back(w: isize) {
+    if w != 0 {
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(w as _);
+        }
+    }
+}
+
+/// Where the mouse is, in screen pixels.
+#[cfg(windows)]
+pub fn cursor() -> (i32, i32) {
+    let mut p = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p);
+    }
+    (p.x, p.y)
+}
+
+#[cfg(not(windows))]
+pub fn front_window() -> isize {
+    0
+}
+
+#[cfg(not(windows))]
+pub fn bring_back(_: isize) {}
+
+#[cfg(not(windows))]
+pub fn cursor() -> (i32, i32) {
+    (200, 200)
+}

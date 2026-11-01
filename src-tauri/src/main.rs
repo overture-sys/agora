@@ -4,6 +4,8 @@
 
 mod extra;
 mod foreground;
+mod more;
+mod saver;
 mod system;
 
 use std::collections::HashMap;
@@ -48,6 +50,18 @@ struct Settings {
     last_model: String,
     /// "system" (follow Windows), "light" or "dark".
     theme: String,
+    /// Screen saver on the dock: "off", or one of [`saver::SAVERS`].
+    saver: String,
+    /// Minutes the dock sits unused before the screen saver starts.
+    saver_minutes: u32,
+    /// The GIF for the "gif" screen saver.
+    saver_gif: String,
+    /// The temple builds itself on the dock when it connects.
+    dock_intro: bool,
+    /// What the window shows when Agora opens: "agora", "video" or "off".
+    intro: String,
+    /// The user's own intro video (MP4 or WebM).
+    intro_video: String,
 }
 
 impl Default for Settings {
@@ -62,6 +76,12 @@ impl Default for Settings {
             ring_colors: Vec::new(),
             last_model: models::M18.id.into(),
             theme: "system".into(),
+            saver: "off".into(),
+            saver_minutes: 10,
+            saver_gif: String::new(),
+            dock_intro: true,
+            intro: "agora".into(),
+            intro_video: String::new(),
         }
     }
 }
@@ -569,6 +589,196 @@ fn set_key_look(host: State<Host>, key: usize, look: Look) -> Result<(), String>
     with_host(&host, |h| h.set_look(key, look))
 }
 
+#[tauri::command]
+fn set_key_hold(host: State<Host>, key: usize, steps: Vec<serde_json::Value>) -> Result<(), String> {
+    with_host(&host, |h| h.set_hold(key, steps))
+}
+
+#[tauri::command]
+fn set_screen_saver(state: State<Shared>, mode: String, minutes: u32, gif: String) -> Result<(), String> {
+    if mode != "off" && !saver::SAVERS.iter().any(|(id, _)| *id == mode) {
+        return Err("Unknown screen saver".into());
+    }
+    let mut dock = state.lock().unwrap();
+    dock.settings.saver = mode;
+    dock.settings.saver_minutes = minutes.clamp(1, 240);
+    dock.settings.saver_gif = gif;
+    save_settings(&dock.settings_path, &dock.settings);
+    Ok(())
+}
+
+/// Plays a screen saver on the dock now; the next press stops it.
+#[tauri::command]
+fn preview_screen_saver(app: AppHandle, mode: String, gif: String) -> Result<(), String> {
+    if app.state::<Shared>().lock().unwrap().worker.is_none() {
+        return Err("No dock connected".into());
+    }
+    if mode == "intro" {
+        saver::start(&app, saver::Show::Intro);
+    } else {
+        saver::start(&app, saver::Show::Saver { mode, gif });
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_intro(state: State<Shared>, intro: String, video: String, dock_intro: bool) -> Result<(), String> {
+    if !matches!(intro.as_str(), "agora" | "video" | "off") {
+        return Err("Unknown intro".into());
+    }
+    let mut dock = state.lock().unwrap();
+    dock.settings.intro = intro;
+    dock.settings.intro_video = video;
+    dock.settings.dock_intro = dock_intro;
+    save_settings(&dock.settings_path, &dock.settings);
+    Ok(())
+}
+
+/// The user's intro video, as bytes the window turns into a video.
+#[tauri::command]
+fn intro_video(state: State<Shared>) -> Result<tauri::ipc::Response, String> {
+    let path = state.lock().unwrap().settings.intro_video.clone();
+    let lower = path.to_ascii_lowercase();
+    if !(lower.ends_with(".mp4") || lower.ends_with(".webm") || lower.ends_with(".m4v")) {
+        return Err("Pick an MP4 or WebM video".into());
+    }
+    let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    if size > 300 * 1024 * 1024 {
+        return Err("That video is over 300 MB".into());
+    }
+    std::fs::read(&path)
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn audio_outputs() -> Result<Vec<more::Output>, String> {
+    more::win::outputs()
+}
+
+#[tauri::command]
+fn audio_apps() -> Vec<String> {
+    more::win::audio_apps()
+}
+
+/// A program's own icon as a PNG data URI, for an Open key.
+#[tauri::command]
+fn app_icon(path: String) -> Option<String> {
+    let img = more::win::app_icon(path.trim().trim_matches('"'))?;
+    png_data_uri(&image::DynamicImage::ImageRgba8(img))
+}
+
+/// The snippets of the Snippets key last pressed, for its pop-up.
+fn snippet_state() -> &'static Mutex<(Vec<String>, bool)> {
+    static S: std::sync::OnceLock<Mutex<(Vec<String>, bool)>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+#[tauri::command]
+fn snippet_list() -> Vec<String> {
+    snippet_state().lock().unwrap().0.clone()
+}
+
+/// Hides the pop-up, lets the window before it come back to the front,
+/// then types the snippet there.
+#[tauri::command]
+fn pick_snippet(app: AppHandle, index: Option<usize>) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("snippets") {
+        let _ = w.hide();
+    }
+    let (list, enter) = snippet_state().lock().unwrap().clone();
+    let front = SNIPPET_FRONT.load(std::sync::atomic::Ordering::Relaxed);
+    let Some(text) = index.and_then(|i| list.get(i).cloned()) else {
+        return Ok(());
+    };
+    std::thread::spawn(move || {
+        foreground::bring_back(front);
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = system::type_text(&text, enter);
+    });
+    Ok(())
+}
+
+/// The window that was in front when the Snippets key was pressed.
+static SNIPPET_FRONT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Shows the Snippets pop-up beside the mouse.
+fn show_snippets(app: &AppHandle, settings: &serde_json::Value) -> Result<(), String> {
+    let list: Vec<String> = settings
+        .get("snippets")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .take(20)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if list.is_empty() {
+        return Err("Add snippets in the key's settings".into());
+    }
+    let enter = settings.get("enter").and_then(|v| v.as_bool()).unwrap_or(false);
+    let rows = list.len();
+    *snippet_state().lock().unwrap() = (list, enter);
+    SNIPPET_FRONT.store(foreground::front_window(), std::sync::atomic::Ordering::Relaxed);
+    let (x, y) = foreground::cursor();
+    let height = (rows as f64 * 36.0 + 20.0).min(600.0);
+    let app2 = app.clone();
+    app.run_on_main_thread(move || {
+        let window = match app2.get_webview_window("snippets") {
+            Some(w) => w,
+            None => match WebviewWindowBuilder::new(&app2, "snippets", WebviewUrl::App("index.html".into()))
+                .initialization_script("window.__agoraSnippets = true;")
+                .title("Agora snippets")
+                .decorations(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .resizable(false)
+                .visible(false)
+                .inner_size(320.0, height)
+                .build()
+            {
+                Ok(w) => w,
+                Err(_) => return,
+            },
+        };
+        let _ = window.set_size(tauri::LogicalSize::new(320.0, height));
+        let _ = window.set_position(tauri::PhysicalPosition::new(x + 8, y + 8));
+        let _ = window.emit("snippets-changed", ());
+        let _ = window.show();
+        let _ = window.set_focus();
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// Starts the screen saver once the dock has sat unused long enough.
+fn watch_idle(app: AppHandle) {
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let (mode, minutes, gif, connected) = {
+            let shared = app.state::<Shared>();
+            let dock = shared.lock().unwrap();
+            (
+                dock.settings.saver.clone(),
+                dock.settings.saver_minutes.max(1),
+                dock.settings.saver_gif.clone(),
+                dock.worker.is_some(),
+            )
+        };
+        if mode == "off"
+            || !connected
+            || saver::active()
+            || DOCK_ASLEEP.load(std::sync::atomic::Ordering::Relaxed)
+            || saver::idle() < Duration::from_secs(minutes as u64 * 60)
+        {
+            continue;
+        }
+        saver::start(&app, saver::Show::Saver { mode, gif });
+    }
+}
+
 /// Brightness and light ring keys: change the dock's saved settings.
 fn run_dock_action(
     app: &AppHandle,
@@ -896,7 +1106,7 @@ fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
     let Some(screen) = model.keys.get(key).copied() else {
         return;
     };
-    if !connected {
+    if !connected || saver::active() {
         return;
     }
     let start = face_gens().lock().unwrap().get(&key).copied().unwrap_or(0);
@@ -965,7 +1175,9 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
                     // A new face ends any press bounce still playing on it.
                     let mut gens = face_gens().lock().unwrap();
                     *gens.entry(key).or_default() += 1;
-                    if let (Some(cmd), true) = (send, connected) {
+                    // While a show plays on the dock, faces wait; it redraws
+                    // every key when it ends.
+                    if let (Some(cmd), true, false) = (send, connected, saver::active()) {
                         if let Some(w) = shared.lock().unwrap().worker.as_ref() {
                             w.send(cmd);
                         }
@@ -1026,12 +1238,27 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
             HostEvent::PageChanged => {
                 let _ = app.emit("page-changed", ());
             }
-            HostEvent::Run { action, settings } => {
+            HostEvent::Run { context, action, settings } => {
                 let result = match action.as_str() {
                     "brightness" | "ring" | "dock-sleep" => {
                         run_dock_action(&app, &shared, &action, &settings)
                     }
-                    _ => extra::run(&action, &settings)
+                    "web-request" | "run-command" => {
+                        let app = app.clone();
+                        let _ = std::thread::Builder::new().name("agora-action".into()).spawn(move || {
+                            let (ok, text) = match more::run_with_result(&action, &settings) {
+                                Ok(text) => (true, text),
+                                Err(e) => (false, Some(e)),
+                            };
+                            if let Some(h) = app.state::<Host>().lock().unwrap().as_ref() {
+                                h.action_result(&context, ok, text);
+                            }
+                        });
+                        Ok(())
+                    }
+                    "snippets" => show_snippets(&app, &settings),
+                    _ => more::run(&action, &settings)
+                        .or_else(|| extra::run(&action, &settings))
                         .unwrap_or_else(|| system::run(&action, &settings, open_url)),
                 };
                 if let Err(message) = result {
@@ -1097,6 +1324,10 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
                     h.device_connected(true);
                     h.redraw_all();
                 });
+                saver::touch();
+                if shared.lock().unwrap().settings.dock_intro {
+                    saver::start(&app, saver::Show::Intro);
+                }
                 forward_events(&app, &host, events);
                 tell_host(&|h| h.device_connected(false));
                 let mut dock = shared.lock().unwrap();
@@ -1147,6 +1378,14 @@ fn forward_events(app: &AppHandle, host: &Host, events: Receiver<Event>) {
     for ev in events {
         match ev {
             Event::Input(i) => {
+                saver::touch();
+                // The first press after a screen saver only stops it.
+                if matches!(i.action, Action::Press | Action::Turn(_) | Action::Swipe(_))
+                    && saver::stop(app)
+                {
+                    swallow_release = i.action == Action::Press;
+                    continue;
+                }
                 if i.action == Action::Press
                     && DOCK_ASLEEP.swap(false, std::sync::atomic::Ordering::Relaxed)
                 {
@@ -1260,7 +1499,17 @@ fn main() {
             password_saved,
             forget_password,
             set_key_settings,
-            set_key_look
+            set_key_look,
+            set_key_hold,
+            set_screen_saver,
+            preview_screen_saver,
+            set_intro,
+            intro_video,
+            audio_outputs,
+            audio_apps,
+            app_icon,
+            snippet_list,
+            pick_snippet
         ])
         .setup(move |app| {
             let show = MenuItem::with_id(app, "show", "Show Agora", true, None::<&str>)?;
@@ -1314,6 +1563,10 @@ fn main() {
             std::thread::Builder::new()
                 .name("agora-connect".into())
                 .spawn(move || connection_loop(handle, shared, host))?;
+            let idle_app = app.handle().clone();
+            std::thread::Builder::new()
+                .name("agora-idle".into())
+                .spawn(move || watch_idle(idle_app))?;
             let watched = app.state::<Host>().inner().clone();
             std::thread::Builder::new()
                 .name("agora-foreground".into())

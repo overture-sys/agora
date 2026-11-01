@@ -737,3 +737,79 @@ fn page_indicator_and_next_profile() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+fn hold_actions_counters_timers_and_hotkey_switch() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.device_connected(true);
+
+    // A tap runs the key's action; a hold runs the hold steps instead.
+    host.place(0, builtin::PLUGIN, "website").unwrap();
+    host.set_settings(0, serde_json::json!({ "url": "https://tap.example" }));
+    host.set_hold(
+        0,
+        vec![serde_json::json!({ "action": "website", "settings": { "url": "https://hold.example" } })],
+    );
+    host.key(0, true);
+    host.key(0, false);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Run { settings, .. } if settings["url"] == "https://tap.example"));
+    host.key(0, true);
+    std::thread::sleep(Duration::from_millis(800));
+    host.key(0, false);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Run { settings, .. } if settings["url"] == "https://hold.example"));
+
+    // A counter counts taps and a hold resets it.
+    host.place(1, builtin::PLUGIN, "counter").unwrap();
+    for _ in 0..3 {
+        host.key(1, true);
+        host.key(1, false);
+    }
+    let end = Instant::now() + Duration::from_secs(5);
+    while host.key_info(1).unwrap().settings["count"] != 3 {
+        assert!(Instant::now() < end, "counter didn't reach 3");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    host.key(1, true);
+    std::thread::sleep(Duration::from_millis(800));
+    host.key(1, false);
+    let end = Instant::now() + Duration::from_secs(5);
+    while host.key_info(1).unwrap().settings["count"] != 0 {
+        assert!(Instant::now() < end, "counter didn't reset");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Hotkey switch alternates its two hotkeys.
+    host.place(2, builtin::PLUGIN, builtin::HOTKEY_SWITCH).unwrap();
+    host.set_settings(2, serde_json::json!({ "keys": "Ctrl+A", "keys_b": "Ctrl+B" }));
+    host.key(2, true);
+    host.key(2, false);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Run { action, settings, .. } if action == "hotkey" && settings["keys"] == "Ctrl+A"));
+    host.key(2, true);
+    host.key(2, false);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Run { action, settings, .. } if action == "hotkey" && settings["keys"] == "Ctrl+B"));
+
+    // A one-second timer runs out and says so.
+    host.place(3, builtin::PLUGIN, "timer").unwrap();
+    host.set_settings(3, serde_json::json!({ "minutes": 0, "seconds": 1 }));
+    host.key(3, true);
+    host.key(3, false);
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 3, face } if face.image.as_deref().is_some_and(|i| {
+        let b = i.trim_start_matches("data:image/svg+xml;base64,");
+        String::from_utf8(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).unwrap()).unwrap().contains("DONE")
+    })));
+
+    // Text an action sends back shows on its key.
+    host.place(5, builtin::PLUGIN, "run-command").unwrap();
+    host.key(5, true);
+    host.key(5, false);
+    let context = loop {
+        if let HostEvent::Run { context, action, .. } = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            if action == "run-command" {
+                break context;
+            }
+        }
+    };
+    host.action_result(&context, true, Some("hello there".into()));
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 5, face } if face.title == "hello there"));
+}

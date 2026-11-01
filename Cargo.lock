@@ -10,11 +10,12 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agora"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "agora-device",
  "agora-host",
  "base64 0.22.1",
+ "chrono",
  "enigo",
  "image",
  "serde",
@@ -25,12 +26,13 @@ dependencies = [
  "tauri-plugin-single-instance",
  "trash",
  "windows 0.61.3",
+ "windows-core 0.61.2",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "agora-device"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "hidapi",
  "image",
@@ -39,11 +41,12 @@ dependencies = [
 
 [[package]]
 name = "agora-host"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "agora-device",
  "axum",
  "base64 0.22.1",
+ "chrono",
  "image",
  "percent-encoding",
  "resvg",
@@ -56,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "agora-m18"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "agora-device",
 ]
@@ -1480,6 +1483,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "gio"
 version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1927,6 +1940,8 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif 0.14.2",
  "moxcms",
  "num-traits",
  "png 0.18.1",
@@ -3157,7 +3172,7 @@ version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8928798c0a55e03c9ca6c4c6846f76377427d2c1e1f7e6de3c06ae57942df43"
 dependencies = [
- "gif",
+ "gif 0.13.3",
  "image-webp",
  "log",
  "pico-args",

@@ -21,12 +21,16 @@ Your keys, profiles and settings live in `%APPDATA%\Agora` and are kept when you
 - **Docks:** Stream Dock M18 (tested). Also M18 V3, 293V3, 293S (three versions), N3, N4 / N4 Pro and XL (untested).
 - **Keys:** drag an action onto a key, button or knob. Your own title, title position, colour and icon on any key.
 - **Profiles, pages and folders.** A profile can follow an app: it comes up while that app is in front.
-- **Agora's own actions:** open an app, file or folder; website; hotkey (press the keys to record them); type text; media keys; quick controls (sleep, lock, show desktop, screen off, microphone mute, switch screens); quick tools (Calculator, emoji panel, Task Manager, search and more); close window; mouse click, scroll and move; browser back, forward, refresh and tabs; saved passwords (kept in Windows Credential Manager); soundboard; UDP network messages; dock brightness, dock sleep and the light ring; next, previous or go to page, page indicator; switch profile (or the next or previous one); folder.
+- **Agora's own actions:** open an app, file or folder; website; hotkey (press the keys to record them); type text; media keys; quick controls (sleep, lock, show desktop, screen off, microphone mute, switch screens); quick tools (Calculator, emoji panel, Task Manager, search and more); close window; mouse click, scroll and move; browser back, forward, refresh and tabs; saved passwords (kept in Windows Credential Manager); soundboard; UDP network messages; web requests (Home Assistant, webhooks); run a PowerShell command and show its output; snippets picker; window tools (next screen, snap, maximise, keep on top); sound output switching and per-app volume; hotkey switch; dock brightness, dock sleep and the light ring; next, previous or go to page, page indicator; switch profile (or the next or previous one); folder.
 - **Monitor keys:** live CPU, memory, disk, GPU and GPU memory readings, and your public or local IP address.
-- **Multi-actions:** run several actions in order with pauses, a Toggle that alternates between two lists, and a Knob action for turning left, turning right and pressing.
+- **Time keys:** clock, timer, stopwatch and counter.
+- **Hold for a second action:** any key can run a different list of actions when held for half a second.
+- **Multi-actions:** run several actions in order with pauses, a Toggle that alternates between two lists, a Random action that picks one, and a Knob action for turning left, turning right and pressing.
 - **Plugins:** runs Stream Dock plugins unchanged (Node.js, HTML and .exe plugins), with their own settings panels. Knob actions get dial turns, presses and strip taps. Tested with Winged Keys and Shannon Keys.
 - **Undo:** removing a key, page, profile or plugin can be undone for a few seconds (Undo, or Ctrl+Z).
-- **Dock:** screen brightness, the M18's light ring (one colour, or paint it light by light), start with Windows.
+- **Dock:** screen brightness, the M18's light ring (one colour, or paint it light by light), start with Windows, a screen saver (Matrix rain, the Agora temple, starfield, big clock or your own GIF) and an intro when the dock connects.
+- **Intro:** the Agora temple builds itself when the app opens, or play your own video.
+- **Open keys** take the app's own icon.
 - **VSD Craft import:** brings in your M18 profiles from VSD Craft. Agora only reads VSD Craft's files and never changes them.
 
 Plugins are read from `%APPDATA%\Agora\plugins`, and, if you switch it on in Plugins, from VSD Craft's plugin folder (`%APPDATA%\HotSpot\StreamDock\plugins`), read only. Plugin output goes to `%APPDATA%\Agora\logs`.

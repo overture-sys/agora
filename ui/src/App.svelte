@@ -3,6 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
+  import Intro from "./Intro.svelte";
   import "@fontsource/marcellus-sc/400.css";
   import "@fontsource/inter/400.css";
   import "@fontsource/inter/500.css";
@@ -17,7 +18,7 @@
   type Action = { plugin: string; plugin_name: string; category: string; action: string; name: string; tooltip: string; icon: string | null; group_icon: string | null; controllers: string[] };
   type Plugin = { uuid: string; name: string; version: string; source: string; kind: string; status: string; dir: string; hidden: boolean };
   type Look = { title?: string | null; show_title?: boolean | null; align?: string | null; color?: string | null; font_size?: number | null; icon?: string | null };
-  type KeyInfo = { key: number; plugin: string; plugin_name: string; action: string; name: string; settings_url: string | null; builtin: boolean; settings: Record<string, any>; look: Look };
+  type KeyInfo = { key: number; plugin: string; plugin_name: string; action: string; name: string; settings_url: string | null; builtin: boolean; settings: Record<string, any>; look: Look; hold?: Step[] };
   type NameId = { id: string; name: string };
   type Step = { action: string; settings: Record<string, any> };
   type Save = (patch: Record<string, unknown>) => void;
@@ -25,7 +26,7 @@
   type Preview = { key: number; image: string | null };
   type PageOverview = { layout: LayoutView; keys: KeyInfo[] };
   type Line = { plugin: string; message: string };
-  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[]; theme?: string };
+  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[]; theme?: string; saver?: string; saver_minutes?: number; saver_gif?: string; dock_intro?: boolean; intro?: string; intro_video?: string };
   type LogLine = { time: string; text: string; err: boolean };
   type Page = "home" | "keys" | "plugins" | "dock";
 
@@ -140,7 +141,7 @@
   const savingCommands = new Set([
     "place_action", "move_key", "set_key_settings", "set_key_look", "layout_op", "set_brightness", "set_ring",
     "set_ring_lights", "ring_off", "set_ring_brightness", "set_start_with_windows", "set_use_vsd_craft_plugins",
-    "import_vsd_profiles", "show_plugin",
+    "import_vsd_profiles", "show_plugin", "set_key_hold", "set_screen_saver", "set_intro",
   ]);
 
   function flash(text: string) {
@@ -347,9 +348,33 @@
     await call("set_key_look", { key: selected, look });
   }
 
-  async function pickProgram(save: Save) {
+  async function pickProgram(save: Save, autoIcon = false) {
     const path = await openDialog({ multiple: false, directory: false, title: "Choose an app or file" }).catch(() => null);
-    if (typeof path === "string") save({ path });
+    if (typeof path === "string") {
+      save({ path });
+      if (autoIcon) useAppIcon(path);
+    }
+  }
+
+  /// An Open key without its own icon takes the program's.
+  async function useAppIcon(path: string) {
+    if (!info || info.action !== "open" || info.look.icon || !/\.(exe|lnk)$/i.test(path.trim().replace(/"/g, ""))) return;
+    const icon = await invoke<string | null>("app_icon", { path }).catch(() => null);
+    if (icon && info && !info.look.icon) saveLook({ icon });
+  }
+
+  async function pickFile(title: string, name: string, extensions: string[]) {
+    const path = await openDialog({ multiple: false, directory: false, title, filters: [{ name, extensions }] }).catch(() => null);
+    return typeof path === "string" ? path : null;
+  }
+
+  // Sound outputs and apps playing sound, for the Audio keys.
+  function audioOutputs() {
+    return invoke<{ id: string; name: string; default: boolean }[]>("audio_outputs").catch(() => []);
+  }
+  let audioApps = $state<string[]>([]);
+  async function loadAudioApps() {
+    audioApps = await invoke<string[]>("audio_apps").catch(() => []);
   }
 
   async function pickSound(save: Save) {
@@ -391,10 +416,16 @@
     sound: { mode: "play", path: "", volume: 100 },
     udp: { host: "", port: 0, message: "", hex: false },
     "dock-sleep": {},
+    "audio-output": { mode: "cycle", device: "", device_name: "" },
+    "app-volume": { app: "", what: "up", step: 10 },
+    "web-request": { method: "POST", url: "https://", body: "", content_type: "application/json" },
+    "run-command": { command: "", show_output: false },
+    snippets: { snippets: [], enter: false },
+    window: { what: "next-screen" },
     delay: { ms: 500 },
   };
   const stepChoices = $derived([
-    ...actions.filter((a) => a.plugin === "com.agora.builtin" && !["folder", "multi", "toggle", "dial", "page-indicator", "cpu", "memory", "disk", "gpu", "gpu-memory", "ip"].includes(a.action)).map((a) => ({ id: a.action, name: a.name })),
+    ...actions.filter((a) => a.plugin === "com.agora.builtin" && !["folder", "multi", "toggle", "dial", "page-indicator", "cpu", "memory", "disk", "gpu", "gpu-memory", "ip", "random", "hotkey-switch", "clock", "timer", "stopwatch", "counter"].includes(a.action)).map((a) => ({ id: a.action, name: a.name })),
     { id: "delay", name: "Pause" },
   ]);
 
@@ -402,31 +433,45 @@
     return id === "delay" ? "Pause" : (actions.find((a) => a.plugin === "com.agora.builtin" && a.action === id)?.name ?? id);
   }
 
+  // "hold" is the key's own hold list, kept beside its settings.
   function stepList(field: string): Step[] {
+    if (field === HOLD) return [...(info?.hold ?? [])];
     return [...((info?.settings[field] ?? []) as Step[])];
+  }
+
+  const HOLD = "\u0000hold";
+
+  function saveSteps(field: string, list: Step[]) {
+    if (field === HOLD) {
+      if (!info || selected === null) return;
+      info.hold = list;
+      call("set_key_hold", { key: selected, steps: list });
+    } else {
+      saveSettings({ [field]: list });
+    }
   }
 
   function addStep(field: string, action: string) {
     if (!action) return;
-    saveSettings({ [field]: [...stepList(field), { action, settings: { ...(stepDefaults[action] ?? {}) } }] });
+    saveSteps(field, [...stepList(field), { action, settings: { ...(stepDefaults[action] ?? {}) } }]);
   }
 
   function updateStep(field: string, i: number, patch: Record<string, unknown>) {
     const list = stepList(field);
     list[i] = { ...list[i], settings: { ...list[i].settings, ...patch } };
-    saveSettings({ [field]: list });
+    saveSteps(field, list);
   }
 
   function moveStep(field: string, i: number, by: number) {
     const list = stepList(field);
     [list[i], list[i + by]] = [list[i + by], list[i]];
-    saveSettings({ [field]: list });
+    saveSteps(field, list);
   }
 
   function removeStep(field: string, i: number) {
     const list = stepList(field);
     list.splice(i, 1);
-    saveSettings({ [field]: list });
+    saveSteps(field, list);
   }
 
   /// Reads an image file, shrinks it to the key's size and saves it as the key's icon.
@@ -523,6 +568,24 @@
   }
 
   // Right-click menu on a key that has an action.
+  let introMode = $state<string | null>(null);
+  const savers = [
+    { id: "off", name: "Off" },
+    { id: "matrix", name: "Matrix rain" },
+    { id: "temple", name: "Agora temple" },
+    { id: "stars", name: "Starfield" },
+    { id: "clock", name: "Big clock" },
+    { id: "gif", name: "Your own GIF" },
+  ];
+  async function saveSaver(patch: Partial<Settings>) {
+    settings = { ...settings, ...patch };
+    await call("set_screen_saver", { mode: settings.saver ?? "off", minutes: settings.saver_minutes ?? 10, gif: settings.saver_gif ?? "" });
+  }
+  async function saveIntro(patch: Partial<Settings>) {
+    settings = { ...settings, ...patch };
+    await call("set_intro", { intro: settings.intro ?? "agora", video: settings.intro_video ?? "", dockIntro: settings.dock_intro ?? true });
+  }
+
   let keyMenu = $state<{ x: number; y: number; k: number } | null>(null);
 
   function openKeyMenu(e: MouseEvent, k: number) {
@@ -789,6 +852,21 @@
     refreshStatus();
     loadPreviews();
     call<Settings>("get_settings").then((s) => {
+      // The intro plays once, when the window is first seen.
+      const mode = s?.intro ?? "agora";
+      if (mode !== "off") {
+        const play = () => (introMode = mode);
+        if (document.visibilityState === "visible") play();
+        else {
+          const once = () => {
+            if (document.visibilityState === "visible") {
+              document.removeEventListener("visibilitychange", once);
+              play();
+            }
+          };
+          document.addEventListener("visibilitychange", once);
+        }
+      }
       if (!s) return;
       settings = s;
       setTheme((s.theme as Theme) || "system", false);
@@ -1106,8 +1184,8 @@
       </label>
     {:else if action === "open"}
       <label>App, file or folder
-        <span class="row grow"><input value={st.path ?? ""} placeholder="C:\Program Files\..." onchange={(e) => save({ path: e.currentTarget.value })} />
-          <button onclick={() => pickProgram(save)}>File…</button><button onclick={() => pickFolderPath(save)}>Folder…</button></span>
+        <span class="row grow"><input value={st.path ?? ""} placeholder="C:\Program Files\..." onchange={(e) => { save({ path: e.currentTarget.value }); if (st === info?.settings) useAppIcon(e.currentTarget.value); }} />
+          <button onclick={() => pickProgram(save, st === info?.settings)}>File…</button><button onclick={() => pickFolderPath(save)}>Folder…</button></span>
       </label>
       <label>Arguments <span class="muted small">(programs only)</span><input value={st.args ?? ""} onchange={(e) => save({ args: e.currentTarget.value })} /></label>
     {:else if action === "website"}
@@ -1243,6 +1321,102 @@
       <p class="muted small">The public address is looked up every 15 minutes through OpenDNS; press the key to look again.</p>
     {:else if ["cpu", "memory", "gpu", "gpu-memory"].includes(action)}
       <p class="muted small">Updates every 2 seconds while the key is on the dock.</p>
+    {:else if action === "hotkey-switch"}
+      <label>First press
+        <input class="hotkey" value={st.keys ?? ""} placeholder="Click here, then press the keys" readonly onkeydown={(e) => recordHotkey(e, (p) => save({ keys: p.keys }))} />
+      </label>
+      <label>Second press
+        <input class="hotkey" value={st.keys_b ?? ""} placeholder="Click here, then press the keys" readonly onkeydown={(e) => recordHotkey(e, (p) => save({ keys_b: p.keys }))} />
+      </label>
+      <p class="muted small">The key shows which one comes next. Backspace clears a box.</p>
+    {:else if action === "random"}
+      {@render stepsEditor("steps", "Each press runs one of these, picked at random")}
+    {:else if action === "audio-output"}
+      <label>Each press
+        <select value={st.mode ?? "cycle"} onchange={(e) => save({ mode: e.currentTarget.value })}>
+          <option value="cycle">Switch to the next output</option><option value="set">Switch to one output</option>
+        </select>
+      </label>
+      {#if st.mode === "set"}
+        {#await audioOutputs() then outs}
+          <label>Output
+            <select value={st.device ?? ""} onchange={(e) => { const o = outs.find((x) => x.id === e.currentTarget.value); save({ device: e.currentTarget.value, device_name: o?.name ?? "" }); }}>
+              <option value="" disabled>Choose an output</option>
+              {#if st.device && !outs.some((o) => o.id === st.device)}<option value={st.device}>{st.device_name || "Saved output"} (not plugged in)</option>{/if}
+              {#each outs as o}<option value={o.id}>{o.name}{o.default ? " (in use)" : ""}</option>{/each}
+            </select>
+          </label>
+        {/await}
+      {/if}
+    {:else if action === "app-volume"}
+      <label>App
+        <input value={st.app ?? ""} list="audio-apps" placeholder="spotify.exe" onfocus={loadAudioApps} onchange={(e) => save({ app: e.currentTarget.value })} />
+        <datalist id="audio-apps">{#each audioApps as a}<option value={a}></option>{/each}</datalist>
+      </label>
+      <p class="muted small">Apps playing sound now are suggested. The app needs to have played sound since it started.</p>
+      <label>Each press
+        <select value={st.what ?? "up"} onchange={(e) => save({ what: e.currentTarget.value })}>
+          <option value="up">Louder</option><option value="down">Quieter</option><option value="mute">Mute or unmute</option>
+        </select>
+      </label>
+      {#if (st.what ?? "up") !== "mute"}
+        <label class="slider"><span>Step <b>{st.step ?? 10}%</b></span>
+          <input type="range" min="1" max="50" value={st.step ?? 10} style="--fill: {((st.step ?? 10) / 50) * 100}%" onchange={(e) => save({ step: Number(e.currentTarget.value) })} />
+        </label>
+      {/if}
+    {:else if action === "web-request"}
+      <span class="row"><label>Method
+        <select value={st.method ?? "POST"} onchange={(e) => save({ method: e.currentTarget.value })}>
+          {#each ["GET", "POST", "PUT", "PATCH", "DELETE"] as m}<option value={m}>{m}</option>{/each}
+        </select></label></span>
+      <label>Web address <input value={st.url ?? ""} placeholder="http://homeassistant.local:8123/api/webhook/lights" onchange={(e) => save({ url: e.currentTarget.value })} /></label>
+      {#if (st.method ?? "POST") !== "GET"}
+        <label>Body <textarea rows="3" value={st.body ?? ""} placeholder={'{"on": true}'} onchange={(e) => save({ body: e.currentTarget.value })}></textarea></label>
+        <label>Content type <input value={st.content_type ?? "application/json"} onchange={(e) => save({ content_type: e.currentTarget.value })} /></label>
+      {/if}
+      <p class="muted small">The key shows a tick when the request works, or the reason when it doesn't.</p>
+    {:else if action === "run-command"}
+      <label>PowerShell command <textarea rows="3" class="mono" value={st.command ?? ""} placeholder="(Get-Date).ToString('HH:mm')" onchange={(e) => save({ command: e.currentTarget.value })}></textarea></label>
+      <label class="check"><input type="checkbox" checked={st.show_output ?? true} onchange={(e) => save({ show_output: e.currentTarget.checked })} /> Show what it prints on the key</label>
+      <p class="muted small">Runs hidden, as you, and stops after a minute.</p>
+    {:else if action === "snippets"}
+      <label>Snippets, one per line
+        <textarea rows="5" value={(st.snippets ?? []).join("\n")} placeholder={"Thanks, speak soon!\nmy.name@example.com"} onchange={(e) => save({ snippets: e.currentTarget.value.split("\n").filter((l) => l.trim()) })}></textarea>
+      </label>
+      <label class="check"><input type="checkbox" checked={!!st.enter} onchange={(e) => save({ enter: e.currentTarget.checked })} /> Press Enter after</label>
+      <p class="muted small">A press shows the list beside the mouse. Pick one (or press its number) and it's typed where you were.</p>
+    {:else if action === "window"}
+      <label>Each press
+        <select value={st.what ?? "next-screen"} onchange={(e) => save({ what: e.currentTarget.value })}>
+          <option value="next-screen">Move to the next screen</option><option value="snap-left">Snap to the left half</option>
+          <option value="snap-right">Snap to the right half</option><option value="snap-top">Snap to the top half</option>
+          <option value="snap-bottom">Snap to the bottom half</option><option value="maximize">Maximise or restore</option>
+          <option value="minimize">Minimise</option><option value="on-top">Keep on top, or stop</option>
+        </select>
+      </label>
+      <p class="muted small">Works on the window in front.</p>
+    {:else if action === "clock"}
+      <label>Time
+        <select value={st.format ?? "24h"} onchange={(e) => save({ format: e.currentTarget.value })}>
+          <option value="24h">24-hour (14:05)</option><option value="12h">12-hour (2:05 PM)</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" checked={!!st.seconds} onchange={(e) => save({ seconds: e.currentTarget.checked })} /> Show seconds</label>
+    {:else if action === "timer"}
+      <span class="row"><label>Minutes <input type="number" min="0" max="5999" value={st.minutes ?? 5} onchange={(e) => save({ minutes: Number(e.currentTarget.value) })} /></label>
+        <label>Seconds <input type="number" min="0" max="59" value={st.seconds ?? 0} onchange={(e) => save({ seconds: Number(e.currentTarget.value) })} /></label></span>
+      <label>Sound when it ends <span class="muted small">(optional)</span>
+        <span class="row grow"><input value={st.sound ?? ""} placeholder="C:\Sounds\bell.mp3" onchange={(e) => save({ sound: e.currentTarget.value })} />
+          <button onclick={async () => { const p = await pickFile("Choose a sound", "Sounds", ["mp3", "wav", "wma", "m4a", "aac"]); if (p) save({ sound: p }); }}>File…</button></span>
+      </label>
+      <p class="muted small">Press to start or pause. Hold to reset. When it ends, the next press resets it.</p>
+    {:else if action === "stopwatch"}
+      <p class="muted small">Press to start or pause. Hold to reset.</p>
+    {:else if action === "counter"}
+      <label>Name <span class="muted small">(shown above the number)</span><input value={st.name ?? ""} placeholder="Count" onchange={(e) => save({ name: e.currentTarget.value })} /></label>
+      <span class="row"><label>Add each press <input type="number" value={st.step ?? 1} onchange={(e) => save({ step: Number(e.currentTarget.value) })} /></label>
+        <label>Count now <input type="number" value={st.count ?? 0} onchange={(e) => save({ count: Number(e.currentTarget.value) })} /></label></span>
+      <p class="muted small">Hold the key to put it back to 0.</p>
     {:else if action === "delay"}
       <label>Pause for (milliseconds) <input type="number" min="0" max="60000" step="100" value={st.ms ?? 500} onchange={(e) => save({ ms: Number(e.currentTarget.value) })} /></label>
     {:else if action === "multi"}
@@ -1262,7 +1436,7 @@
 {/snippet}
 
 {#snippet stepsEditor(field: string, label: string)}
-  {@const list = (info?.settings[field] ?? []) as Step[]}
+  {@const list = (field === HOLD ? (info?.hold ?? []) : (info?.settings[field] ?? [])) as Step[]}
   <div class="steps">
     <h3>{label}</h3>
     {#if list.length === 0}<p class="muted small">No steps yet.</p>{/if}
@@ -1468,6 +1642,13 @@
             {#if selected !== null && (selected < BUTTON_BASE || (isDial(selected) && status.strip))}
               {@render lookEditor(info)}
             {/if}
+            {#if selected !== null && !isDial(selected) && !(info.builtin && ["dial"].includes(info.action))}
+              <details class="look" open={(info.hold ?? []).length > 0}>
+                <summary>When held{(info.hold ?? []).length ? ` · ${(info.hold ?? []).length} step${(info.hold ?? []).length > 1 ? "s" : ""}` : ""}</summary>
+                <p class="muted small">Hold the key for half a second to run these instead of its action. A quick press still runs the action.{info.builtin && ["timer", "stopwatch", "counter"].includes(info.action) ? " With nothing here, holding resets it." : ""}</p>
+                {@render stepsEditor(HOLD, "Steps when held")}
+              </details>
+            {/if}
             {#if info.settings_url}
               {#key info.settings_url}
                 <iframe class="pi" src={info.settings_url} title="Settings for {info.name}"></iframe>
@@ -1610,6 +1791,57 @@
         {/if}
 
         <section class="screen-card">
+          <h2>Screen saver</h2>
+          <div class="form">
+            <label>On the dock
+              <select value={settings.saver ?? "off"} onchange={(e) => saveSaver({ saver: e.currentTarget.value })}>
+                {#each savers as sv}<option value={sv.id}>{sv.name}</option>{/each}
+              </select>
+            </label>
+            {#if (settings.saver ?? "off") !== "off"}
+              <label>Start after (minutes unused) <input type="number" min="1" max="240" value={settings.saver_minutes ?? 10} onchange={(e) => saveSaver({ saver_minutes: Number(e.currentTarget.value) })} /></label>
+            {/if}
+            {#if settings.saver === "gif"}
+              <label>GIF
+                <span class="row grow"><input value={settings.saver_gif ?? ""} placeholder="C:\Pictures\loop.gif" onchange={(e) => saveSaver({ saver_gif: e.currentTarget.value })} />
+                  <button onclick={async () => { const p = await pickFile("Choose a GIF", "GIF", ["gif"]); if (p) saveSaver({ saver_gif: p }); }}>File…</button></span>
+              </label>
+              <p class="muted small">It's stretched across all the keys, cropped to fit.</p>
+            {/if}
+            {#if (settings.saver ?? "off") !== "off"}
+              <div class="row"><button onclick={() => call("preview_screen_saver", { mode: settings.saver, gif: settings.saver_gif ?? "" })}>Try it on the dock</button></div>
+              <p class="muted small">Any press on the dock stops it; that press doesn't run the key.</p>
+            {/if}
+          </div>
+        </section>
+
+        <section class="screen-card">
+          <h2>Intro</h2>
+          <div class="form">
+            <label>When Agora opens
+              <select value={settings.intro ?? "agora"} onchange={(e) => saveIntro({ intro: e.currentTarget.value })}>
+                <option value="agora">The Agora temple</option><option value="video">Your own video</option><option value="off">Nothing</option>
+              </select>
+            </label>
+            {#if settings.intro === "video"}
+              <label>Video
+                <span class="row grow"><input value={settings.intro_video ?? ""} placeholder="C:\Videos\intro.mp4" onchange={(e) => saveIntro({ intro_video: e.currentTarget.value })} />
+                  <button onclick={async () => { const p = await pickFile("Choose a video", "Videos", ["mp4", "webm", "m4v"]); if (p) saveIntro({ intro_video: p }); }}>File…</button></span>
+              </label>
+              <p class="muted small">MP4 or WebM, up to 300 MB. A click or any key skips it.</p>
+            {/if}
+            <div class="row"><button onclick={() => (introMode = settings.intro === "off" ? "agora" : (settings.intro ?? "agora"))}>Play it now</button></div>
+            <label class="switch-row">
+              <input type="checkbox" role="switch" checked={settings.dock_intro ?? true} onchange={(e) => saveIntro({ dock_intro: e.currentTarget.checked })} />
+              <span>
+                Build the temple on the dock when it connects
+                <span class="muted small">About two seconds, then your keys come back. <button class="link" onclick={() => call("preview_screen_saver", { mode: "intro", gif: "" })}>Try it</button></span>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section class="screen-card">
           <h2>Agora</h2>
           <div class="theme-row">
             <span>Look</span>
@@ -1633,6 +1865,9 @@
           </label>
         </section>
       </div>
+    {/if}
+    {#if introMode}
+      <Intro mode={introMode} ondone={() => (introMode = null)} />
     {/if}
     {#if keyMenu}
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->

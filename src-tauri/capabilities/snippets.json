@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "snippets",
+  "description": "The Snippets pop-up",
+  "windows": [
+    "snippets"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

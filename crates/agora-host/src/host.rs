@@ -103,6 +103,9 @@ pub enum HostEvent {
     PageChanged,
     /// Carry out one of Agora's system actions (open, hotkey, media...).
     Run {
+        /// The key's action, so a result can be shown on it (see
+        /// [`Host::action_result`]).
+        context: String,
         action: String,
         settings: Value,
     },
@@ -154,6 +157,8 @@ pub struct KeyInfo {
     pub builtin: bool,
     pub settings: Value,
     pub look: Look,
+    /// Steps run when the key is held instead of tapped.
+    pub hold: Vec<Value>,
 }
 
 /// The title and icon the user chose for a key. Anything left empty comes
@@ -244,6 +249,9 @@ struct Instance {
     state: usize,
     #[serde(default, skip_serializing_if = "is_default")]
     look: Look,
+    /// Agora steps to run when the key is held down instead of tapped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hold: Vec<Value>,
     /// Per-state images and titles set by the plugin. Not saved: plugins
     /// redraw on willAppear.
     #[serde(skip)]
@@ -269,6 +277,7 @@ impl Instance {
             settings,
             state: 0,
             look: Look::default(),
+            hold: Vec::new(),
             images: HashMap::new(),
             titles: HashMap::new(),
         }
@@ -573,6 +582,13 @@ pub(crate) enum Msg {
     Shutdown(oneshot::Sender<()>),
     /// New readings for the monitor keys.
     Stats(Box<stats::Snapshot>),
+    /// Twice a second, for clocks, timers and stopwatches.
+    Tick,
+    /// A key has been down long enough to count as held.
+    HoldTimer(usize, u64),
+    SetHold(usize, Vec<Value>),
+    /// How an action the app ran went: ok or not, and text to show.
+    ActionResult(String, bool, Option<String>),
 }
 
 /// The app's handle on a running host. Methods block briefly; call them from
@@ -612,6 +628,15 @@ impl HostHandle {
         layout.fix();
         let stats_tx = tx.clone();
         let stats_ctl = stats::start(move |s| stats_tx.send(Msg::Stats(Box::new(s))).is_ok());
+        let tick_tx = tx.clone();
+        let _ = std::thread::Builder::new()
+            .name("agora-tick".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(500));
+                if tick_tx.send(Msg::Tick).is_err() {
+                    break;
+                }
+            });
         let state = State {
             config,
             port,
@@ -634,6 +659,10 @@ impl HostHandle {
             undo: None,
             stats: stats::Snapshot::default(),
             stats_ctl,
+            holding: HashMap::new(),
+            hold_seq: 0,
+            watches: HashMap::new(),
+            results: HashMap::new(),
         };
         runtime.spawn(state.run(rx));
         tx.send(Msg::AllFaces(true)).ok();
@@ -721,6 +750,17 @@ impl HostHandle {
 
     pub fn key_info(&self, key: usize) -> Option<KeyInfo> {
         self.ask(|o| Msg::KeyInfo(key, o)).flatten()
+    }
+
+    /// Agora steps to run when a key on the current page is held.
+    pub fn set_hold(&self, key: usize, steps: Vec<Value>) {
+        let _ = self.tx.send(Msg::SetHold(key, steps));
+    }
+
+    /// How an action from [`HostEvent::Run`] went. `text`, if any, shows
+    /// as the key's title until it runs again.
+    pub fn action_result(&self, context: &str, ok: bool, text: Option<String>) {
+        let _ = self.tx.send(Msg::ActionResult(context.into(), ok, text));
     }
 
     /// Settings for one of Agora's own actions on the current page.
@@ -814,6 +854,87 @@ struct State {
     /// The latest readings for monitor keys, and the sampler's controls.
     stats: stats::Snapshot,
     stats_ctl: stats::Control,
+    /// Keys down that have an action for holding: which press, and whether
+    /// the hold action has run.
+    holding: HashMap<usize, (u64, bool)>,
+    hold_seq: u64,
+    /// Timers and stopwatches, by action context. Not saved.
+    watches: HashMap<String, Watch>,
+    /// Text an action sent back (Run command), by context, shown as title.
+    results: HashMap<String, String>,
+}
+
+/// A running or paused timer or stopwatch.
+#[derive(Debug, Clone, Default)]
+struct Watch {
+    started: Option<std::time::Instant>,
+    banked: Duration,
+    done: bool,
+}
+
+impl Watch {
+    fn elapsed(&self) -> Duration {
+        self.banked + self.started.map_or(Duration::ZERO, |t| t.elapsed())
+    }
+    fn toggle(&mut self) {
+        match self.started.take() {
+            Some(t) => self.banked += t.elapsed(),
+            None => self.started = Some(std::time::Instant::now()),
+        }
+    }
+}
+
+/// How long a key must be down to count as held.
+const HOLD: Duration = Duration::from_millis(500);
+
+/// How long a Timer runs.
+fn timer_length(settings: &Value) -> Duration {
+    let n = |k: &str| settings.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let secs = n("minutes") * 60 + n("seconds") + n("hours") * 3600;
+    Duration::from_secs(if secs == 0 { 300 } else { secs.min(100 * 3600) })
+}
+
+/// A title from text an action sent back: its first line, kept short.
+fn result_title(text: &str) -> String {
+    let line = text.trim().lines().next().unwrap_or("").trim();
+    let mut out: String = line.chars().take(30).collect();
+    if line.chars().count() > 30 {
+        out.push('\u{2026}');
+    }
+    // Two lines of 15 fit on a key.
+    if out.chars().count() > 15 {
+        let at = out
+            .char_indices()
+            .filter(|(i, c)| *c == ' ' && *i <= 16)
+            .map(|(i, _)| i)
+            .next_back()
+            .unwrap_or_else(|| out.char_indices().nth(15).map_or(out.len(), |(i, _)| i));
+        let (a, b) = out.split_at(at);
+        out = format!("{}\n{}", a.trim_end(), b.trim_start());
+    }
+    out
+}
+
+/// A random number below `n`, good enough for picking an action.
+fn random_index(n: usize) -> usize {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    (h.finish() % n.max(1) as u64) as usize
+}
+
+/// "4:05" or "1:02:03".
+fn clock_text(d: Duration) -> String {
+    let t = d.as_secs();
+    if t >= 3600 {
+        format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
+    } else {
+        format!("{}:{:02}", t / 60, t % 60)
+    }
 }
 
 /// The drive a Disk key shows, as "C:".
@@ -1037,6 +1158,7 @@ impl State {
             | Msg::SetHidden(_, false)
             | Msg::Forget(..)
             | Msg::SetSettings(..)
+            | Msg::SetHold(..)
             | Msg::SetLook(..)
             | Msg::ImportVsd(..)
             | Msg::Layout(..) => self.undo = None,
@@ -1112,6 +1234,35 @@ impl State {
                 let _ = done.send(self.plugins.remove(&uuid).map(|p| p.dir));
             }
             Msg::Key(key, pressed) => self.on_key(key, pressed),
+            Msg::Tick => self.on_tick(),
+            Msg::HoldTimer(key, seq) => self.on_hold(key, seq),
+            Msg::SetHold(key, steps) => {
+                if let Some(inst) = self.layout.keys_mut().get_mut(&key) {
+                    inst.hold = steps
+                        .into_iter()
+                        .filter(|s| {
+                            s.get("action")
+                                .and_then(Value::as_str)
+                                .is_some_and(builtin::step_allowed)
+                        })
+                        .collect();
+                    self.dirty = true;
+                }
+            }
+            Msg::ActionResult(context, ok, text) => {
+                if let Some(key) = self.key_of(&context) {
+                    match text {
+                        Some(t) => {
+                            self.results.insert(context, t);
+                        }
+                        None => {
+                            self.results.remove(&context);
+                        }
+                    }
+                    self.redraw(key);
+                    self.flash(key, if ok { Overlay::Ok } else { Overlay::Alert });
+                }
+            }
             Msg::Dial(dial, input) => self.on_dial(dial, input),
             Msg::Swipe(direction) => {
                 let action = if direction < 0 {
@@ -1380,6 +1531,8 @@ impl State {
         };
         let mut face = if inst.plugin == BUILTIN && builtin::is_monitor(&inst.action) {
             self.monitor_face(&inst)
+        } else if inst.plugin == BUILTIN && builtin::is_live(&inst.action) {
+            self.live_face(&inst)
         } else if inst.plugin == BUILTIN {
             Face {
                 image: builtin::icon_for(&inst.action, inst.state),
@@ -1402,6 +1555,11 @@ impl State {
             face.align = "middle".into();
             face.font_size = 16.0;
             face.image = None;
+        }
+        if let Some(text) = self.results.get(&inst.context) {
+            face.title = result_title(text);
+            face.align = "middle".into();
+            face.font_size = 10.0;
         }
         let look = &inst.look;
         if let Some(t) = &look.title {
@@ -1810,10 +1968,16 @@ impl State {
             return;
         };
         if !pressed {
+            let same = self.down.remove(&key).as_deref() == Some(inst.context.as_str());
+            if let Some((_, fired)) = self.holding.remove(&key) {
+                // Let go before it counted as held: a tap.
+                if same && !fired {
+                    self.tap(key, &inst);
+                }
+                return;
+            }
             // Only the action that saw the press gets the release.
-            if self.down.remove(&key).as_deref() == Some(inst.context.as_str())
-                && inst.plugin != BUILTIN
-            {
+            if same && inst.plugin != BUILTIN {
                 self.send_instance(key, "keyUp", json!({}));
             }
             return;
@@ -1827,9 +1991,166 @@ impl State {
                     self.emit(HostEvent::Pressed { key, face });
                 }
             }
+        }
+        if !inst.hold.is_empty() || (inst.plugin == BUILTIN && builtin::resets_on_hold(&inst.action))
+        {
+            // Wait to see whether it's a tap or a hold.
+            self.hold_seq += 1;
+            let seq = self.hold_seq;
+            self.holding.insert(key, (seq, false));
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(HOLD).await;
+                let _ = tx.send(Msg::HoldTimer(key, seq));
+            });
+            return;
+        }
+        if inst.plugin == BUILTIN {
             self.run_builtin(&inst);
         } else {
             self.send_instance(key, "keyDown", json!({}));
+        }
+    }
+
+    /// A short press on a key that also has an action for holding.
+    fn tap(&mut self, key: usize, inst: &Instance) {
+        if inst.plugin == BUILTIN {
+            self.run_builtin(inst);
+        } else {
+            self.send_instance(key, "keyDown", json!({}));
+            self.send_instance(key, "keyUp", json!({}));
+        }
+    }
+
+    fn on_hold(&mut self, key: usize, seq: u64) {
+        match self.holding.get_mut(&key) {
+            Some((s, fired)) if *s == seq && !*fired => *fired = true,
+            _ => return,
+        }
+        let Some(inst) = self.layout.keys().get(&key).cloned() else {
+            return;
+        };
+        if self.down.get(&key) != Some(&inst.context) {
+            return;
+        }
+        if !inst.hold.is_empty() {
+            self.run_steps(inst.hold.clone());
+        } else {
+            self.reset_watch(key, &inst);
+        }
+    }
+
+    /// Holding a timer, stopwatch or counter puts it back to the start.
+    fn reset_watch(&mut self, key: usize, inst: &Instance) {
+        if inst.action == "counter" {
+            if let Some(i) = self.layout.keys_mut().get_mut(&key) {
+                i.settings["count"] = json!(0);
+                self.dirty = true;
+            }
+        } else {
+            self.watches.remove(&inst.context);
+        }
+        self.redraw(key);
+    }
+
+    fn on_tick(&mut self) {
+        let keys: Vec<(usize, Instance)> = self
+            .layout
+            .keys()
+            .iter()
+            .filter(|(_, i)| i.plugin == BUILTIN && builtin::is_live(&i.action))
+            .map(|(k, i)| (*k, i.clone()))
+            .collect();
+        for (k, inst) in keys {
+            if inst.action == "timer" {
+                let total = timer_length(&inst.settings);
+                if let Some(w) = self.watches.get_mut(&inst.context) {
+                    if !w.done && w.started.is_some() && w.elapsed() >= total {
+                        w.started = None;
+                        w.banked = total;
+                        w.done = true;
+                        let sound = inst
+                            .settings
+                            .get("sound")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        if !sound.is_empty() {
+                            self.emit(HostEvent::Run {
+                                context: inst.context.clone(),
+                                action: "sound".into(),
+                                settings: json!({ "path": sound, "volume": 100 }),
+                            });
+                        }
+                    }
+                }
+            }
+            self.redraw(k);
+        }
+    }
+
+    /// The face of a clock, timer, stopwatch or counter.
+    fn live_face(&self, inst: &Instance) -> Face {
+        let watch = self.watches.get(&inst.context);
+        let paused = watch.is_some_and(|w| w.started.is_none() && !w.done && w.banked > Duration::ZERO);
+        let (label, value, bar) = match inst.action.as_str() {
+            "clock" => {
+                let now = chrono::Local::now();
+                let twelve = inst.settings.get("format").and_then(Value::as_str) == Some("12h");
+                let secs = inst.settings.get("seconds").and_then(Value::as_bool).unwrap_or(false);
+                let fmt = match (twelve, secs) {
+                    (true, true) => "%-I:%M:%S",
+                    (true, false) => "%-I:%M %p",
+                    (false, true) => "%H:%M:%S",
+                    (false, false) => "%H:%M",
+                };
+                (
+                    now.format("%a %-d %b").to_string().to_uppercase(),
+                    now.format(fmt).to_string(),
+                    None,
+                )
+            }
+            "timer" => {
+                let total = timer_length(&inst.settings);
+                let w = watch.cloned().unwrap_or_default();
+                let left = total.saturating_sub(w.elapsed());
+                let label = if w.done {
+                    "DONE"
+                } else if paused {
+                    "PAUSED"
+                } else {
+                    "TIMER"
+                };
+                // Round up, so it shows 0:00 only when it's over.
+                let shown = Duration::from_secs(left.as_secs() + u64::from(left.subsec_nanos() > 0));
+                (
+                    label.to_string(),
+                    clock_text(shown),
+                    Some(left.as_secs_f32() / total.as_secs_f32().max(1.0)),
+                )
+            }
+            "stopwatch" => (
+                if paused { "PAUSED" } else { "STOPWATCH" }.to_string(),
+                clock_text(watch.map_or(Duration::ZERO, Watch::elapsed)),
+                None,
+            ),
+            _ => {
+                let name = inst.settings.get("name").and_then(Value::as_str).unwrap_or("").trim();
+                (
+                    if name.is_empty() { "COUNT".to_string() } else { name.to_uppercase() },
+                    inst.settings.get("count").and_then(Value::as_i64).unwrap_or(0).to_string(),
+                    None,
+                )
+            }
+        };
+        Face {
+            image: Some(builtin::monitor_image(&label, &value, bar)),
+            title: String::new(),
+            show_title: true,
+            align: "bottom".into(),
+            font_size: 11.0,
+            color: "#ffffff".into(),
+            overlay: Overlay::None,
         }
     }
 
@@ -1944,6 +2265,58 @@ impl State {
             self.run_steps(steps);
             return;
         }
+        match inst.action.as_str() {
+            builtin::HOTKEY_SWITCH => {
+                let k = if inst.state == 1 { "keys_b" } else { "keys" };
+                let keys = inst.settings.get(k).cloned().unwrap_or(json!(""));
+                self.flip_toggle(&inst.context);
+                self.emit(HostEvent::Run {
+                    context: inst.context.clone(),
+                    action: "hotkey".into(),
+                    settings: json!({ "keys": keys }),
+                });
+                return;
+            }
+            builtin::RANDOM => {
+                let steps: Vec<Value> = inst
+                    .settings
+                    .get("steps")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter(|s| s.get("action").and_then(Value::as_str) != Some(builtin::DELAY)).cloned().collect())
+                    .unwrap_or_default();
+                if !steps.is_empty() {
+                    let pick = random_index(steps.len());
+                    self.run_steps(vec![steps[pick].clone()]);
+                }
+                return;
+            }
+            "timer" | "stopwatch" => {
+                let w = self.watches.entry(inst.context.clone()).or_default();
+                if w.done {
+                    *w = Watch::default();
+                } else {
+                    w.toggle();
+                }
+                if let Some(k) = self.key_of(&inst.context) {
+                    self.redraw(k);
+                }
+                return;
+            }
+            "counter" => {
+                if let Some(k) = self.key_of(&inst.context) {
+                    let step = inst.settings.get("step").and_then(Value::as_i64).unwrap_or(1);
+                    let count = inst.settings.get("count").and_then(Value::as_i64).unwrap_or(0);
+                    if let Some(i) = self.layout.keys_mut().get_mut(&k) {
+                        i.settings["count"] = json!(count.saturating_add(step));
+                        self.dirty = true;
+                    }
+                    self.redraw(k);
+                }
+                return;
+            }
+            "clock" => return,
+            _ => {}
+        }
         if builtin::is_monitor(&inst.action) {
             // A press looks the address up again; the others just show.
             if inst.action == "ip" {
@@ -1955,6 +2328,7 @@ impl State {
         }
         if !def.navigation {
             self.emit(HostEvent::Run {
+                context: inst.context.clone(),
                 action: inst.action.clone(),
                 settings: inst.settings.clone(),
             });
@@ -2037,6 +2411,7 @@ impl State {
             self.send_instance(k, "willDisappear", json!({}));
         }
         self.down.clear();
+        self.holding.clear();
     }
 
     /// Draws every key of the page now showing and tells plugins.
@@ -2505,6 +2880,7 @@ impl State {
                 builtin: true,
                 settings: inst.settings.clone(),
                 look: inst.look.clone(),
+                hold: inst.hold.clone(),
             });
         }
         let plugin = self.plugins.get(&inst.plugin)?;
@@ -2537,6 +2913,7 @@ impl State {
             builtin: false,
             settings: inst.settings.clone(),
             look: inst.look.clone(),
+            hold: inst.hold.clone(),
         })
     }
 

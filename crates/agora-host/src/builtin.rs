@@ -30,6 +30,10 @@ pub const SWITCH_PROFILE: &str = "switch-profile";
 /// Shows "page n / m"; a press goes to the next page.
 pub const PAGE_INDICATOR: &str = "page-indicator";
 pub const MULTI: &str = "multi";
+/// Runs one of its steps at random.
+pub const RANDOM: &str = "random";
+/// Presses one hotkey, then the other on the next press.
+pub const HOTKEY_SWITCH: &str = "hotkey-switch";
 pub const TOGGLE: &str = "toggle";
 /// A pause between multi-action steps; only inside multi-actions.
 pub const DELAY: &str = "delay";
@@ -302,11 +306,119 @@ pub static DEFS: &[Def] = &[
         navigation: false,
     },
     Def {
+        id: HOTKEY_SWITCH,
+        name: "Hotkey switch",
+        group: "System",
+        tooltip: "Presses one hotkey, then a second one on the next press",
+        icon: r##"<rect x="10" y="12" width="52" height="24" rx="4" S/><path d="M18 20 h2 M27 20 h2 M36 20 h2 M45 20 h8 M20 29 h32" S/><rect x="18" y="42" width="36" height="18" rx="9" S/><circle cx="48" cy="51" r="5" S/>"##,
+        settings: || json!({ "keys": "", "keys_b": "" }),
+        navigation: false,
+    },
+    Def {
+        id: "audio-output",
+        name: "Audio output",
+        group: "Audio",
+        tooltip: "Switches sound between your speakers, headset and other outputs",
+        icon: r##"<path d="M14 40 v-6 a22 22 0 0 1 44 0 v6" S/><rect x="12" y="40" width="10" height="16" rx="3" S/><rect x="50" y="40" width="10" height="16" rx="3" S/>"##,
+        settings: || json!({ "mode": "cycle", "device": "", "device_name": "" }),
+        navigation: false,
+    },
+    Def {
+        id: "app-volume",
+        name: "App volume",
+        group: "Audio",
+        tooltip: "Turns one app's volume up or down, or mutes it",
+        icon: r##"<path d="M12 30 h10 l12 -10 v32 l-12 -10 h-10 z" S/><path d="M44 28 a10 10 0 0 1 0 16 M50 22 a18 18 0 0 1 0 28" S/>"##,
+        settings: || json!({ "app": "", "what": "up", "step": 10 }),
+        navigation: false,
+    },
+    Def {
+        id: "web-request",
+        name: "Web request",
+        group: "System",
+        tooltip: "Sends a request to a web address, for Home Assistant, webhooks and smart lights",
+        icon: r##"<circle cx="30" cy="38" r="16" S/><path d="M14 38 h32 M30 22 c-8 8 -8 24 0 32" S/><path d="M44 18 h14 v14 M58 18 l-14 14" S/>"##,
+        settings: || json!({ "method": "POST", "url": "https://", "body": "", "content_type": "application/json" }),
+        navigation: false,
+    },
+    Def {
+        id: "run-command",
+        name: "Run command",
+        group: "System",
+        tooltip: "Runs a PowerShell command, and can show what it prints on the key",
+        icon: r##"<rect x="10" y="16" width="52" height="40" rx="4" S/><path d="M20 30 l8 6 l-8 6 M32 44 h14" S/>"##,
+        settings: || json!({ "command": "", "show_output": true }),
+        navigation: false,
+    },
+    Def {
+        id: "snippets",
+        name: "Snippets",
+        group: "System",
+        tooltip: "Shows your saved snippets beside the mouse; pick one to type it",
+        icon: r##"<rect x="16" y="12" width="40" height="48" rx="4" S/><path d="M24 24 h24 M24 33 h24 M24 42 h14" S/>"##,
+        settings: || json!({ "snippets": [], "enter": false }),
+        navigation: false,
+    },
+    Def {
+        id: "window",
+        name: "Window",
+        group: "System",
+        tooltip: "Moves the window in front to the other screen, snaps it, or keeps it on top",
+        icon: r##"<rect x="10" y="14" width="52" height="40" rx="4" S/><path d="M10 24 h52 M36 24 v30" S/>"##,
+        settings: || json!({ "what": "next-screen" }),
+        navigation: false,
+    },
+    Def {
+        id: "clock",
+        name: "Clock",
+        group: "Time",
+        tooltip: "Shows the time and date",
+        icon: r##"<circle cx="36" cy="36" r="22" S/><path d="M36 22 v14 l9 6" S/>"##,
+        settings: || json!({ "format": "24h", "seconds": false }),
+        navigation: false,
+    },
+    Def {
+        id: "timer",
+        name: "Timer",
+        group: "Time",
+        tooltip: "Counts down; press to start or pause, hold to reset",
+        icon: r##"<circle cx="36" cy="40" r="19" S/><path d="M30 14 h12 M36 14 v7 M36 40 l8 -8" S/>"##,
+        settings: || json!({ "minutes": 5, "seconds": 0, "sound": "" }),
+        navigation: false,
+    },
+    Def {
+        id: "stopwatch",
+        name: "Stopwatch",
+        group: "Time",
+        tooltip: "Counts up; press to start or pause, hold to reset",
+        icon: r##"<circle cx="36" cy="40" r="19" S/><path d="M30 14 h12 M36 14 v7 M36 40 v-11 M52 22 l4 -4" S/>"##,
+        settings: || json!({}),
+        navigation: false,
+    },
+    Def {
+        id: "counter",
+        name: "Counter",
+        group: "Time",
+        tooltip: "Adds one each press; hold to reset",
+        icon: r##"<rect x="12" y="18" width="48" height="36" rx="5" S/><path d="M26 30 v12 M20 36 h12 M42 30 v12" S/>"##,
+        settings: || json!({ "count": 0, "step": 1, "name": "" }),
+        navigation: false,
+    },
+    Def {
         id: MULTI,
         name: "Multi-action",
         group: "Multi-action",
         tooltip: "Runs several actions in order, with pauses if you like",
         icon: r##"<rect x="14" y="14" width="44" height="12" rx="3" S/><rect x="14" y="30" width="44" height="12" rx="3" S/><rect x="14" y="46" width="44" height="12" rx="3" S/>"##,
+        settings: || json!({ "steps": [] }),
+        navigation: false,
+    },
+    Def {
+        id: RANDOM,
+        name: "Random action",
+        group: "Multi-action",
+        tooltip: "Runs one of its actions, picked at random",
+        icon: r##"<rect x="14" y="14" width="44" height="44" rx="6" S/><circle cx="26" cy="26" r="2" S/><circle cx="46" cy="26" r="2" S/><circle cx="36" cy="36" r="2" S/><circle cx="26" cy="46" r="2" S/><circle cx="46" cy="46" r="2" S/>"##,
         settings: || json!({ "steps": [] }),
         navigation: false,
     },
@@ -334,7 +446,20 @@ pub static DEFS: &[Def] = &[
 /// folders, multi-actions and knobs, plus pauses.
 pub fn step_allowed(id: &str) -> bool {
     id == DELAY
-        || (def(id).is_some() && !matches!(id, FOLDER | MULTI | TOGGLE | DIAL) && !is_monitor(id))
+        || (def(id).is_some()
+            && !matches!(id, FOLDER | MULTI | TOGGLE | DIAL | RANDOM | HOTKEY_SWITCH)
+            && !is_monitor(id)
+            && !is_live(id))
+}
+
+/// Keys that redraw themselves as time passes or count presses.
+pub fn is_live(id: &str) -> bool {
+    def(id).is_some_and(|d| d.group == "Time")
+}
+
+/// Keys whose hold, unless the user gave them a hold action, resets them.
+pub fn resets_on_hold(id: &str) -> bool {
+    matches!(id, "timer" | "stopwatch" | "counter")
 }
 
 /// Keys that show a live reading.
@@ -414,7 +539,7 @@ fn draw(id: &str, transform: &str) -> Option<String> {
 /// The icon for a key in a given state: a Toggle shows which set runs next.
 pub fn icon_for(id: &str, state: usize) -> Option<String> {
     let uri = icon(id)?;
-    if id != TOGGLE || state == 0 {
+    if !matches!(id, TOGGLE | HOTKEY_SWITCH) || state == 0 {
         return Some(uri);
     }
     let b64 = uri.strip_prefix("data:image/svg+xml;base64,")?;
@@ -434,6 +559,8 @@ pub fn group_icon(group: &str) -> Option<String> {
         "Multi-action" => MULTI,
         "Knob" => DIAL,
         "Monitor" => "cpu",
+        "Time" => "clock",
+        "Audio" => "app-volume",
         _ => "open",
     })
 }

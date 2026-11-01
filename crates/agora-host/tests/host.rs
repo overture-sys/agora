@@ -813,3 +813,37 @@ fn hold_actions_counters_timers_and_hotkey_switch() {
     host.action_result(&context, true, Some("hello there".into()));
     wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 5, face } if face.title == "hello there"));
 }
+
+#[test]
+fn copy_paste_duplicate_and_move_to_page() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, _rx) = start(data.path());
+
+    host.place(0, builtin::PLUGIN, "website").unwrap();
+    host.set_settings(0, serde_json::json!({ "url": "https://a.example" }));
+    assert!(host.paste(1).is_err(), "nothing copied yet");
+    assert!(host.copy(5).is_err(), "empty key");
+    host.copy(0).unwrap();
+    host.paste(1).unwrap();
+    host.duplicate(0, 2).unwrap();
+    assert_eq!(host.key_info(1).unwrap().settings["url"], "https://a.example");
+    assert_eq!(host.key_info(2).unwrap().settings["url"], "https://a.example");
+    // Copies are their own actions.
+    host.set_settings(1, serde_json::json!({ "url": "https://b.example" }));
+    assert_eq!(host.key_info(0).unwrap().settings["url"], "https://a.example");
+
+    // Folders can't be copied.
+    host.place(3, builtin::PLUGIN, builtin::FOLDER).unwrap();
+    assert!(host.copy(3).is_err());
+
+    // Move key 1 to a new page: it lands on that page's first free key.
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    let view = host.layout().unwrap();
+    let first = view.pages[0].id.clone();
+    let second = view.pages[1].id.clone();
+    host.layout_op(LayoutOp::GoToPage(first.clone())).unwrap();
+    assert_eq!(host.move_to_page(1, &second).unwrap(), 0);
+    assert!(host.key_info(1).is_none());
+    host.layout_op(LayoutOp::GoToPage(second)).unwrap();
+    assert_eq!(host.key_info(0).unwrap().settings["url"], "https://b.example");
+}

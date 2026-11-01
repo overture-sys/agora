@@ -2,7 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import Intro from "./Intro.svelte";
   import "@fontsource/marcellus-sc/400.css";
   import "@fontsource/inter/400.css";
@@ -26,15 +26,16 @@
   type Preview = { key: number; image: string | null };
   type PageOverview = { layout: LayoutView; keys: KeyInfo[] };
   type Line = { plugin: string; message: string };
-  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[]; theme?: string; saver?: string; saver_minutes?: number; saver_gif?: string; dock_intro?: boolean; intro?: string; intro_video?: string };
+  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[]; theme?: string; saver?: string; saver_minutes?: number; saver_gif?: string; dock_intro?: boolean; intro?: string; intro_video?: string; intro_seen_version?: string; hold_ms?: number; app_version?: string };
   type LogLine = { time: string; text: string; err: boolean };
-  type Page = "home" | "keys" | "plugins" | "dock";
+  type Page = "home" | "keys" | "plugins" | "dock" | "settings";
 
   const pages: { id: Page; label: string }[] = [
     { id: "home", label: "Home" },
     { id: "keys", label: "Keys" },
     { id: "plugins", label: "Plugins" },
     { id: "dock", label: "Dock" },
+    { id: "settings", label: "Settings" },
   ];
   const ringSwatches = [
     { name: "Terracotta", color: "#d9794a" },
@@ -87,6 +88,7 @@
   let renaming = $state<{ kind: "page" | "profile"; id: string; name: string } | null>(null);
   // The "apps that bring this profile up" panel.
   let appsOpen = $state(false);
+  let profileMenu = $state(false);
   let recentApps = $state<string[]>([]);
   let typedApp = $state("");
   // Importing VSD Craft profiles.
@@ -558,16 +560,9 @@
 
   async function removeKey() {
     if (selected === null) return;
-    const k = selected;
-    const what = info?.name ? `${info.name} from ${slotName(k).toLowerCase()}` : slotName(k).toLowerCase();
-    await call("clear_key", { key: k });
-    await loadKey(null);
-    refreshPage();
-    setTimeout(refreshPlugins, 500);
-    showUndo({ text: `Removed ${what}.`, undo: async () => { await hostUndo(); loadKey(k); } });
+    await removeKeyAt(selected);
   }
 
-  // Right-click menu on a key that has an action.
   let introMode = $state<string | null>(null);
   const savers = [
     { id: "off", name: "Off" },
@@ -583,27 +578,139 @@
   }
   async function saveIntro(patch: Partial<Settings>) {
     settings = { ...settings, ...patch };
-    await call("set_intro", { intro: settings.intro ?? "agora", video: settings.intro_video ?? "", dockIntro: settings.dock_intro ?? true });
+    await call("set_intro", { intro: settings.intro ?? "update", video: settings.intro_video ?? "", dockIntro: settings.dock_intro ?? true });
   }
 
-  let keyMenu = $state<{ x: number; y: number; k: number } | null>(null);
+  // Right-click menu on a key (or Shift+F10 / the menu key on a focused key).
+  let keyMenu = $state<{ x: number; y: number; k: number; pages: boolean } | null>(null);
+  let menuOpener: HTMLElement | null = null;
+  let clipboardFull = $state(false);
 
-  function openKeyMenu(e: MouseEvent, k: number) {
+  async function openKeyMenu(e: MouseEvent | KeyboardEvent, k: number) {
     e.preventDefault();
-    keyMenu = { x: Math.min(e.clientX, window.innerWidth - 170), y: Math.min(e.clientY, window.innerHeight - 90), k };
+    menuOpener = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+    let x: number, y: number;
+    if (e instanceof MouseEvent && e.clientX) {
+      x = e.clientX;
+      y = e.clientY;
+    } else {
+      const r = menuOpener?.getBoundingClientRect();
+      x = r ? r.left + r.width / 2 : 100;
+      y = r ? r.top + r.height / 2 : 100;
+    }
+    keyMenu = { x: Math.min(x, window.innerWidth - 230), y: Math.min(y, window.innerHeight - 300), k, pages: false };
+    await tick();
+    focusMenuItem(0);
   }
 
-  async function menuEdit() {
-    const k = keyMenu!.k;
-    keyMenu = null;
-    await loadKey(k);
+  function menuItems(): HTMLButtonElement[] {
+    return Array.from(document.querySelectorAll<HTMLButtonElement>(".key-menu button:not(:disabled)"));
   }
 
-  async function menuRemove() {
-    const k = keyMenu!.k;
+  function focusMenuItem(i: number) {
+    const items = menuItems();
+    if (items.length) items[(i + items.length) % items.length].focus();
+  }
+
+  function closeKeyMenu(restore = true) {
     keyMenu = null;
-    await loadKey(k);
-    await removeKey();
+    if (restore && menuOpener?.isConnected) menuOpener.focus();
+    menuOpener = null;
+  }
+
+  function menuKeydown(e: KeyboardEvent) {
+    const items = menuItems();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === "ArrowDown") focusMenuItem(at + 1);
+    else if (e.key === "ArrowUp") focusMenuItem(at - 1);
+    else if (e.key === "Home") focusMenuItem(0);
+    else if (e.key === "End") focusMenuItem(items.length - 1);
+    else if (e.key === "Escape" || (e.key === "ArrowLeft" && keyMenu?.pages)) {
+      if (keyMenu?.pages) showMenuPages(false);
+      else closeKeyMenu();
+    } else if (e.key === "Tab") closeKeyMenu(false);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  async function showMenuPages(on: boolean) {
+    if (!keyMenu) return;
+    keyMenu = { ...keyMenu, pages: on };
+    await tick();
+    focusMenuItem(0);
+  }
+
+  /// Runs a menu item for the key the menu is on, then closes the menu.
+  async function menuDo(f: (k: number) => Promise<unknown> | unknown) {
+    const k = keyMenu!.k;
+    closeKeyMenu();
+    await f(k);
+  }
+
+  async function pressKey(k: number) {
+    await call("press_key", { key: k });
+    flash(`Pressed ${slotName(k).toLowerCase()}.`);
+  }
+
+  async function copyKey(k: number) {
+    await call("copy_key", { key: k });
+    if (error) return;
+    clipboardFull = true;
+    flash(`Copied ${keyInfos[k]?.name ?? slotName(k).toLowerCase()}. Paste it on any key.`);
+  }
+
+  async function pasteKey(k: number) {
+    const had = keyInfos[k];
+    await call("paste_key", { key: k });
+    if (error) return;
+    await afterKeyChange(k);
+    if (had) showUndo({ text: `Pasted over ${had.name}.`, undo: async () => { await hostUndo(); } });
+    else flash(`Pasted on ${slotName(k).toLowerCase()}.`);
+  }
+
+  /// The next free place of the same kind after `from` (wrapping round).
+  function nextFree(from: number) {
+    const same = allSlots.filter((k) => (k >= DIAL_BASE) === (from >= DIAL_BASE) && (k >= BUTTON_BASE && k < DIAL_BASE) === (from >= BUTTON_BASE && from < DIAL_BASE));
+    const i = same.indexOf(from);
+    const order = [...same.slice(i + 1), ...same.slice(0, i)];
+    return order.find((k) => !keyInfos[k]);
+  }
+
+  async function duplicateKey(k: number) {
+    const to = nextFree(k);
+    if (to === undefined) {
+      error = "There's no free key on this page to copy it to.";
+      return;
+    }
+    await call("duplicate_key", { from: k, to });
+    if (error) return;
+    await afterKeyChange(to);
+    flash(`Copied to ${slotName(to).toLowerCase()}.`);
+  }
+
+  async function moveToPage(k: number, target: NameId) {
+    const to = await call<number>("move_key_to_page", { key: k, page: target.id });
+    if (to === undefined) return;
+    if (selected === k) await loadKey(null);
+    refreshPage();
+    showUndo({ text: `Moved to ${slotName(to).toLowerCase()} on ${target.name}.`, undo: async () => { await call("move_key_to_page", { key: to, page: layout!.page }); } });
+  }
+
+  async function afterKeyChange(k: number) {
+    await refreshPage();
+    if (selected === k) await loadKey(k);
+    setTimeout(refreshPlugins, 500);
+  }
+
+  async function removeKeyAt(k: number) {
+    const ki = keyInfos[k];
+    const what = ki?.name ? `${ki.name} from ${slotName(k).toLowerCase()}` : slotName(k).toLowerCase();
+    await call("clear_key", { key: k });
+    if (selected === k) await loadKey(null);
+    refreshPage();
+    setTimeout(refreshPlugins, 500);
+    showUndo({ text: `Removed ${what}.`, undo: async () => { await hostUndo(); } });
   }
 
   // What's being dragged: an action from the list, or a key that has one.
@@ -852,8 +959,13 @@
     refreshStatus();
     loadPreviews();
     call<Settings>("get_settings").then((s) => {
-      // The intro plays once, when the window is first seen.
-      const mode = s?.intro ?? "agora";
+      // The intro plays once, when the window is first seen: every time, or
+      // ("update") on the first run and after an update. Not at all for
+      // people who asked their system for less motion.
+      let mode = s?.intro ?? "update";
+      if (mode === "update") mode = s && s.intro_seen_version === s.app_version ? "off" : "agora";
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) mode = "off";
+      if (s && s.intro_seen_version !== s.app_version) call("intro_played");
       if (mode !== "off") {
         const play = () => (introMode = mode);
         if (document.visibilityState === "visible") play();
@@ -883,8 +995,27 @@
         return;
       }
       if (e.key === "Escape" && keyMenu) {
-        keyMenu = null;
+        closeKeyMenu();
         return;
+      }
+      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLIFrameElement;
+      if (page === "keys" && selected !== null && !typing && !keyMenu) {
+        const ctrl = e.ctrlKey || e.metaKey;
+        if (e.key === "Delete" && keyInfos[selected]) {
+          e.preventDefault();
+          removeKey();
+          return;
+        }
+        if (ctrl && e.key.toLowerCase() === "c" && keyInfos[selected] && !window.getSelection()?.toString()) {
+          e.preventDefault();
+          copyKey(selected);
+          return;
+        }
+        if (ctrl && e.key.toLowerCase() === "v" && clipboardFull) {
+          e.preventDefault();
+          pasteKey(selected);
+          return;
+        }
       }
       if (e.key === "Escape" && page === "keys") {
         if (renaming) renaming = null;
@@ -942,9 +1073,13 @@
     class:pressed={pressedKeys.has(k)}
     class:selected={editable && selected === k}
     class:drop={dropTarget === k}
+    class:held={(keyInfos[k]?.hold ?? []).length > 0}
     onclick={() => (editable ? clickKey(k) : openKey(k))}
     ondblclick={() => editable && openFolder(k)}
-    oncontextmenu={(e) => (editable && previews[k] ? openKeyMenu(e, k) : e.preventDefault())}
+    oncontextmenu={(e) => (editable ? openKeyMenu(e, k) : e.preventDefault())}
+    onkeydown={(e) => {
+      if (editable && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) openKeyMenu(e, k);
+    }}
     draggable={editable && previews[k] ? "true" : "false"}
     ondragstart={(e) => {
       draggedKey = k;
@@ -967,7 +1102,7 @@
       e.preventDefault();
       dropOn(k);
     }}
-    aria-label={`${slotName(k)}, ${keyInfos[k]?.look?.title || keyInfos[k]?.name || "empty"}`}
+    aria-label={`${slotName(k)}, ${keyInfos[k]?.look?.title || keyInfos[k]?.name || "empty"}${(keyInfos[k]?.hold ?? []).length ? ", has a hold action" : ""}`}
     title={editable
       ? keyInfos[k]?.action === "folder" && keyInfos[k]?.builtin
         ? `${slotName(k)}: double-click to open the folder`
@@ -1059,15 +1194,25 @@
           <select value={layout.profile} onchange={(e) => layoutOp("switch-profile", e.currentTarget.value)} aria-label="Profile">
             {#each layout.profiles as p}<option value={p.id}>{p.name}</option>{/each}
           </select>
-          <button class="small" onclick={() => startRename("profile", layout!.profiles.find((p) => p.id === layout!.profile)!)} title="Rename this profile">Rename</button>
-          <button class="small" onclick={() => layoutOp("add-profile", undefined, `Profile ${layout!.profiles.length + 1}`)}>New</button>
-          <button class="small" class:on={appsOpen} onclick={toggleApps} aria-expanded={appsOpen}
-            title="Apps that bring this profile up">Apps{layout.apps.length ? ` (${layout.apps.length})` : ""}</button>
-          <button class="small" class:on={importOpen} onclick={toggleImport} aria-expanded={importOpen}
-            title="Bring in profiles from VSD Craft">Import</button>
-          {#if layout.profiles.length > 1}
-            <button class="small danger" onclick={() => removeWithUndo("profile", layout!.profile)}>Delete</button>
-          {/if}
+          <button class="small" onclick={() => layoutOp("add-profile", undefined, `Profile ${layout!.profiles.length + 1}`)} title="Add a profile">New</button>
+          <div class="more-wrap">
+            <button class="small more" class:on={profileMenu || appsOpen || importOpen} onclick={() => (profileMenu = !profileMenu)}
+              aria-haspopup="menu" aria-expanded={profileMenu} aria-label="More for this profile" title="More for this profile">⋯</button>
+            {#if profileMenu}
+              <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+              <div class="menu-backdrop" onclick={() => (profileMenu = false)}></div>
+              <!-- svelte-ignore a11y_interactive_supports_focus -->
+              <div class="key-menu drop-menu" role="menu" onkeydown={(e) => { if (e.key === "Escape") profileMenu = false; }}>
+                <button role="menuitem" onclick={() => { profileMenu = false; startRename("profile", layout!.profiles.find((p) => p.id === layout!.profile)!); }}>Rename</button>
+                <button role="menuitem" onclick={() => { profileMenu = false; toggleApps(); }}>Apps that bring it up{layout.apps.length ? ` (${layout.apps.length})` : ""}</button>
+                <button role="menuitem" onclick={() => { profileMenu = false; toggleImport(); }}>Import from VSD Craft</button>
+                {#if layout.profiles.length > 1}
+                  <hr />
+                  <button role="menuitem" class="danger" onclick={() => { profileMenu = false; removeWithUndo("profile", layout!.profile); }}>Delete profile</button>
+                {/if}
+              </div>
+            {/if}
+          </div>
         {/if}
       </div>
       {#if importOpen}
@@ -1137,15 +1282,17 @@
                 <button class="tab-edit" onclick={() => startRename("page", p)} aria-label="Rename {p.name}" title="Rename this page">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4" /></svg>
                 </button>
+                {#if layout.pages.length > 1}
+                  <button class="tab-edit bad" onclick={() => removeWithUndo("page", p.id)} aria-label="Delete {p.name}"
+                    title="Delete this page and the folders on it. You can undo it.">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13" /></svg>
+                  </button>
+                {/if}
               {/if}
             </span>
           {/if}
         {/each}
         <button class="tab add" onclick={() => layoutOp("add-page")} title="Add a page">+ Page</button>
-        {#if layout.pages.length > 1 && layout.path.length === 0}
-          <button class="tab remove" onclick={() => removeWithUndo("page", layout!.top_page)}
-            title="Delete this page and the folders on it. You can undo it.">Delete page</button>
-        {/if}
       </nav>
       {#if layout.path.length}
         <nav class="crumbs" aria-label="Folder">
@@ -1502,6 +1649,7 @@
           {#if p.id === "home"}<svg viewBox="0 0 24 24"><path d="M3 10 12 4l9 6M5 10v9h14v-9M9 19v-5h6v5" /></svg>
           {:else if p.id === "keys"}<svg viewBox="0 0 24 24"><rect x="3" y="5" width="5" height="5" rx="1" /><rect x="9.5" y="5" width="5" height="5" rx="1" /><rect x="16" y="5" width="5" height="5" rx="1" /><rect x="3" y="13" width="5" height="5" rx="1" /><rect x="9.5" y="13" width="5" height="5" rx="1" /><rect x="16" y="13" width="5" height="5" rx="1" /></svg>
           {:else if p.id === "plugins"}<svg viewBox="0 0 24 24"><path d="M9 3v4M15 3v4M6 7h12v4a6 6 0 0 1-12 0zM12 17v4" /></svg>
+          {:else if p.id === "settings"}<svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></svg>
           {:else}<svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="9" ry="6" /><circle cx="12" cy="12" r="2" /></svg>{/if}
         </span>
         {p.label}
@@ -1584,6 +1732,24 @@
           <div class="meander"></div>
           {@render pageBar()}
           {@render keyGrid(true)}
+          {#if Object.keys(keyInfos).length > 0}
+            <div class="key-list">
+              <h3>On this page <span class="muted small">{Object.keys(keyInfos).length} of {allSlots.length}</span></h3>
+              {#each Object.values(keyInfos) as ki (ki.key)}
+                {@const hold = ki.hold ?? []}
+                <div class="key-row-wrap">
+                  <button class="key-row" class:current={selected === ki.key} onclick={() => loadKey(ki.key)} oncontextmenu={(e) => openKeyMenu(e, ki.key)}
+                    onkeydown={(e) => { if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) openKeyMenu(e, ki.key); }}>
+                    {#if previews[ki.key]}<img src={previews[ki.key]} alt="" />{:else}<span class="noicon"></span>{/if}
+                    <span class="key-row-text"><b><span class="k">{slotName(ki.key)}</span> · {ki.name}</b><span class="muted small">{ki.plugin_name}{#if hold.length}<span class="hold-note">{" · "}hold: {stepName(hold[0].action)}{hold.length > 1 ? ` +${hold.length - 1}` : ""}</span>{/if}</span></span>
+                  </button>
+                  {#if ki.builtin && ki.action === "folder"}
+                    <button class="small" onclick={() => openFolder(ki.key)} aria-label="Open folder {ki.settings.name ?? ''}">Open</button>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
         </section>
 
         <section class="side">
@@ -1591,70 +1757,53 @@
           {#if selected === null}
             <div class="side-head">
               <div>
-                <h2>{pageName || "Your keys"}</h2>
-                <div class="muted">{Object.keys(keyInfos).length} of {allSlots.length} {allSlots.length > keyCount ? "keys, buttons and knobs" : "keys"} set up. Click one to edit it.</div>
+                <h2>Action library</h2>
+                <div class="muted small">{Object.keys(keyInfos).length} of {allSlots.length} {allSlots.length > keyCount ? "keys, buttons and knobs" : "keys"} on {pageName || "this page"} set up.</div>
               </div>
             </div>
-            {#if Object.keys(keyInfos).length > 0}
-              <div class="key-list">
-                {#each Object.values(keyInfos) as ki (ki.key)}
-                  <div class="key-row-wrap">
-                    <button class="key-row" onclick={() => loadKey(ki.key)} oncontextmenu={(e) => openKeyMenu(e, ki.key)}>
-                      {#if previews[ki.key]}<img src={previews[ki.key]} alt="" />{:else}<span class="noicon"></span>{/if}
-                      <span class="key-row-text"><b><span class="k">{slotName(ki.key)}</span> · {ki.name}</b><span class="muted small">{ki.plugin_name}</span></span>
-                    </button>
-                    {#if ki.builtin && ki.action === "folder"}
-                      <button class="small" onclick={() => openFolder(ki.key)} aria-label="Open folder {ki.settings.name ?? ''}">Open</button>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {/if}
-            <h2 class="lib-head">Action library</h2>
-            <p class="muted hint">Drag an action onto a key{status.buttons ? " or button" : ""}{status.dials ? " or knob" : ""}, or click it to use the first free one. Drag keys onto each other to move or swap them.</p>
+            <p class="muted hint">Drag an action onto a key{status.buttons ? " or button" : ""}{status.dials ? " or knob" : ""}, or click it to use the first free one. Drag keys onto each other to move or swap them; right-click a key for more.</p>
             {@render library()}
           {:else if picking}
-            <div class="side-head">
+            <div class="editor-head">
+              <button class="link back" onclick={() => (info ? (picking = false) : loadKey(null))}>{info ? "← Back to the key" : "← All keys"} <span class="muted">(Esc)</span></button>
               <h2>Pick an action for <span class="k">{slotName(selected).toLowerCase()}</span></h2>
-              <div class="row">
-                {#if info}<button onclick={() => (picking = false)}>Cancel</button>{/if}
-                <button onclick={() => loadKey(null)}>All keys</button>
-              </div>
             </div>
             <p class="muted hint">{isDial(selected) ? "Knobs take Knob, or plugin actions made for knobs." : `Click an action to put it on ${slotName(selected).toLowerCase()}, or drag it onto any key.`}</p>
+            {#if clipboardFull}<div class="row"><button class="small" onclick={() => pasteKey(selected!)}>Paste the copied key here</button></div>{/if}
             {@render library()}
           {:else if info}
-            <div class="side-head">
+            {@const hold = info.hold ?? []}
+            <div class="editor-head">
+              <button class="link back" onclick={() => loadKey(null)}>← All keys <span class="muted">(Esc)</span></button>
               <div>
                 <h2><span class="k">{slotName(selected)}</span> · <span class="item">{info.name}</span></h2>
-                <div class="muted">{info.plugin_name}</div>
+                <div class="muted small">{info.plugin_name}</div>
               </div>
-              <div class="row">
-                {#if info.builtin && info.action === "folder"}<button onclick={() => openFolder(selected!)}>Open</button>{/if}
-                <button class="primary" onclick={() => (picking = true)}>Change</button>
-                <button class="danger" onclick={removeKey}>Remove</button>
-                <button onclick={() => loadKey(null)} title="Back to the overview (Esc)">All keys</button>
+              <div class="row editor-actions">
+                {#if info.builtin && info.action === "folder"}<button onclick={() => openFolder(selected!)}>Open folder</button>{/if}
+                <button onclick={() => (picking = true)}>Change action</button>
+                <button onclick={() => pressKey(selected!)} title="Run this key's action now, as if you tapped it">Press now</button>
+                <button class="danger push" onclick={removeKey} title="Remove this key's action (Delete). You can undo it.">Remove</button>
               </div>
             </div>
             {#if info.builtin}
               {@render actionForm(info.action, info.settings, saveSettings)}
-            {/if}
-            {#if selected !== null && (selected < BUTTON_BASE || (isDial(selected) && status.strip))}
-              {@render lookEditor(info)}
-            {/if}
-            {#if selected !== null && !isDial(selected) && !(info.builtin && ["dial"].includes(info.action))}
-              <details class="look" open={(info.hold ?? []).length > 0}>
-                <summary>When held{(info.hold ?? []).length ? ` · ${(info.hold ?? []).length} step${(info.hold ?? []).length > 1 ? "s" : ""}` : ""}</summary>
-                <p class="muted small">Hold the key for half a second to run these instead of its action. A quick press still runs the action.{info.builtin && ["timer", "stopwatch", "counter"].includes(info.action) ? " With nothing here, holding resets it." : ""}</p>
-                {@render stepsEditor(HOLD, "Steps when held")}
-              </details>
-            {/if}
-            {#if info.settings_url}
+            {:else if info.settings_url}
               {#key info.settings_url}
                 <iframe class="pi" src={info.settings_url} title="Settings for {info.name}"></iframe>
               {/key}
-            {:else if !info.builtin}
+            {:else}
               <p class="muted">This action has no settings.</p>
+            {/if}
+            {#if selected !== null && !isDial(selected) && !(info.builtin && ["dial"].includes(info.action))}
+              <details class="look" open={hold.length > 0}>
+                <summary>When held{hold.length ? ` · ${hold.length} step${hold.length > 1 ? "s" : ""}` : ""}</summary>
+                <p class="muted small">Hold the key for {((settings.hold_ms ?? 500) / 1000).toLocaleString()} s to run these instead of its action. A quick press still runs the action.{info.builtin && ["timer", "stopwatch", "counter"].includes(info.action) ? " With nothing here, holding resets it." : ""} <button class="link" onclick={() => (page = "settings")}>Change the hold time</button></p>
+                {@render stepsEditor(HOLD, "Steps when held")}
+              </details>
+            {/if}
+            {#if selected !== null && (selected < BUTTON_BASE || (isDial(selected) && status.strip))}
+              {@render lookEditor(info)}
             {/if}
           {/if}
         </section>
@@ -1703,12 +1852,11 @@
         <h2>Activity</h2>
         {@render activity(200)}
       </section>
-    {:else}
+    {:else if page === "dock"}
       <div class="dock-page">
-        <div class="dock-col">
         <section class="screen-card">
           <h2>Screen</h2>
-          <p class="muted small">{status.model_name}{status.connected ? "" : " (last connected)"}{#if !status.tested}. Agora hasn't been tried on this model yet. <button class="link" onclick={() => call("open_link", { which: "issues" })}>Tell us what works and what doesn't</button>.{/if}</p>
+          <p class="muted small model-line">{status.model_name}{status.connected ? "" : " (last connected)"}{#if !status.tested}. Agora hasn't been tried on this model yet. <button class="link" onclick={() => call("open_link", { which: "issues" })}>Tell us what works and what doesn't</button>.{/if}</p>
           <label class="slider">
             <span>Key brightness <b>{settings.brightness}%</b></span>
             <input
@@ -1720,19 +1868,18 @@
               onchange={() => call("set_brightness", { percent: settings.brightness })}
             />
           </label>
-        </section>
-
-        <section class="screen-card">
-          <h2>Screen saver</h2>
-          <div class="form">
-            <label>On the dock
-              <select value={settings.saver ?? "off"} onchange={(e) => saveSaver({ saver: e.currentTarget.value })}>
+          <div class="form saver">
+            <div class="field-label" id="saver-label">Screen saver</div>
+            <div class="saver-row">
+              <select aria-labelledby="saver-label" value={settings.saver ?? "off"} onchange={(e) => saveSaver({ saver: e.currentTarget.value })}>
                 {#each savers as sv}<option value={sv.id}>{sv.name}</option>{/each}
               </select>
-            </label>
-            {#if (settings.saver ?? "off") !== "off"}
-              <label>Start after (minutes unused) <input type="number" min="1" max="240" value={settings.saver_minutes ?? 10} onchange={(e) => saveSaver({ saver_minutes: Number(e.currentTarget.value) })} /></label>
-            {/if}
+              {#if (settings.saver ?? "off") !== "off"}
+                <span class="after">after</span>
+                <input type="number" min="1" max="240" aria-label="Minutes unused before it starts" value={settings.saver_minutes ?? 10} onchange={(e) => saveSaver({ saver_minutes: Number(e.currentTarget.value) })} />
+                <span class="after">min</span>
+              {/if}
+            </div>
             {#if settings.saver === "gif"}
               <label>GIF
                 <span class="row grow"><input value={settings.saver_gif ?? ""} placeholder="C:\Pictures\loop.gif" onchange={(e) => saveSaver({ saver_gif: e.currentTarget.value })} />
@@ -1741,28 +1888,8 @@
               <p class="muted small">It's stretched across all the keys, cropped to fit.</p>
             {/if}
             {#if (settings.saver ?? "off") !== "off"}
-              <div class="row"><button onclick={() => call("preview_screen_saver", { mode: settings.saver, gif: settings.saver_gif ?? "" })}>Try it on the dock</button></div>
-              <p class="muted small">Any press on the dock stops it; that press doesn't run the key.</p>
+              <p class="muted small">Any press on the dock stops it; that press doesn't run the key. <button class="link" onclick={() => call("preview_screen_saver", { mode: settings.saver, gif: settings.saver_gif ?? "" })}>Try it on the dock</button></p>
             {/if}
-          </div>
-        </section>
-
-        <section class="screen-card">
-          <h2>Intro</h2>
-          <div class="form">
-            <label>When Agora opens
-              <select value={settings.intro ?? "agora"} onchange={(e) => saveIntro({ intro: e.currentTarget.value })}>
-                <option value="agora">The Agora temple</option><option value="video">Your own video</option><option value="off">Nothing</option>
-              </select>
-            </label>
-            {#if settings.intro === "video"}
-              <label>Video
-                <span class="row grow"><input value={settings.intro_video ?? ""} placeholder="C:\Videos\intro.mp4" onchange={(e) => saveIntro({ intro_video: e.currentTarget.value })} />
-                  <button onclick={async () => { const p = await pickFile("Choose a video", "Videos", ["mp4", "webm", "m4v"]); if (p) saveIntro({ intro_video: p }); }}>File…</button></span>
-              </label>
-              <p class="muted small">MP4 or WebM, up to 300 MB. A click or any key skips it.</p>
-            {/if}
-            <div class="row"><button onclick={() => (introMode = settings.intro === "off" ? "agora" : (settings.intro ?? "agora"))}>Play it now</button></div>
           </div>
           <label class="switch-row">
             <input type="checkbox" role="switch" checked={settings.dock_intro ?? true} onchange={(e) => saveIntro({ dock_intro: e.currentTarget.checked })} />
@@ -1772,8 +1899,6 @@
             </span>
           </label>
         </section>
-        </div>
-        <div class="dock-col">
         {#if status.ring_leds > 0}
         <section class="ring-card">
           <div class="side-head">
@@ -1803,8 +1928,8 @@
             {/each}
           </svg>
           <div class="seg" role="group" aria-label="How colours apply">
-            <button class:active={!paint} onclick={() => (paint = false)}>Whole ring</button>
-            <button class:active={paint} onclick={() => { paint = true; brush = settings.ring_color; }}>Paint lights</button>
+            <button class:active={!paint} aria-pressed={!paint} onclick={() => (paint = false)}>Whole ring</button>
+            <button class:active={paint} aria-pressed={paint} onclick={() => { paint = true; brush = settings.ring_color; }}>Paint lights</button>
           </div>
           {#if paint}<p class="muted small">Pick a colour, then click or drag over the lights.</p>{/if}
           {/if}
@@ -1813,6 +1938,7 @@
               <button
                 class="swatch-btn"
                 class:chosen={paint ? brush === sw.color : settings.ring_on && !settings.ring_colors.length && settings.ring_color.toLowerCase() === sw.color}
+                aria-pressed={paint ? brush === sw.color : settings.ring_on && !settings.ring_colors.length && settings.ring_color.toLowerCase() === sw.color}
                 style="--sw: {sw.color}"
                 title={sw.name}
                 aria-label={sw.name}
@@ -1843,10 +1969,13 @@
         </section>
         {/if}
 
-        <section class="screen-card">
-          <h2>Agora</h2>
+      </div>
+    {:else}
+      <div class="settings-page">
+        <section>
+          <h2>Look</h2>
           <div class="theme-row">
-            <span>Look</span>
+            <span>Theme</span>
             <div class="seg" role="group" aria-label="Light or dark">
               {#each themes as t}
                 <button class:active={theme === t.id} aria-pressed={theme === t.id} onclick={() => setTheme(t.id)}>{t.label}</button>
@@ -1866,18 +1995,75 @@
             </span>
           </label>
         </section>
-        </div>
+
+        <section>
+          <h2>Intro</h2>
+          <div class="form">
+            <label>When Agora opens
+              <select value={settings.intro ?? "update"} onchange={(e) => saveIntro({ intro: e.currentTarget.value })}>
+                <option value="update">The temple, after an update</option>
+                <option value="agora">The temple, every time</option>
+                <option value="video">Your own video</option>
+                <option value="off">Nothing</option>
+              </select>
+            </label>
+            {#if settings.intro === "video"}
+              <label>Video
+                <span class="row grow"><input value={settings.intro_video ?? ""} placeholder="C:\Videos\intro.mp4" onchange={(e) => saveIntro({ intro_video: e.currentTarget.value })} />
+                  <button onclick={async () => { const p = await pickFile("Choose a video", "Videos", ["mp4", "webm", "m4v"]); if (p) saveIntro({ intro_video: p }); }}>File…</button></span>
+              </label>
+              <p class="muted small">MP4 or WebM, up to 300 MB. A click or any key skips it.</p>
+            {/if}
+            <p class="muted small">It's skipped when Windows is set to show fewer animations.</p>
+            <div class="row"><button onclick={() => (introMode = settings.intro === "video" ? "video" : "agora")}>Play it now</button></div>
+          </div>
+        </section>
+
+        <section>
+          <h2>Keys</h2>
+          <label class="slider">
+            <span>Hold time <b>{((settings.hold_ms ?? 500) / 1000).toLocaleString()} s</b></span>
+            <input type="range" min="300" max="1000" step="50" bind:value={settings.hold_ms}
+              style="--fill: {(((settings.hold_ms ?? 500) - 300) / 700) * 100}%"
+              onchange={() => call("set_hold_time", { ms: settings.hold_ms ?? 500 })} />
+          </label>
+          <p class="muted small">How long to keep a key down for its "When held" steps. Shorter feels quicker; longer avoids running them by accident.</p>
+        </section>
       </div>
     {/if}
     {#if introMode}
       <Intro mode={introMode} ondone={() => (introMode = null)} />
     {/if}
     {#if keyMenu}
+      {@const mk = keyMenu.k}
+      {@const has = !!keyInfos[mk]}
+      {@const isFolder = keyInfos[mk]?.builtin && keyInfos[mk]?.action === "folder"}
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-      <div class="menu-backdrop" onclick={() => (keyMenu = null)} oncontextmenu={(e) => { e.preventDefault(); keyMenu = null; }}></div>
-      <div class="key-menu" role="menu" style="left: {keyMenu.x}px; top: {keyMenu.y}px">
-        <button role="menuitem" onclick={menuEdit}>Edit key</button>
-        <button role="menuitem" class="danger" onclick={menuRemove}>Remove key</button>
+      <div class="menu-backdrop" onclick={() => closeKeyMenu(false)} oncontextmenu={(e) => { e.preventDefault(); closeKeyMenu(false); }}></div>
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
+      <div class="key-menu" role="menu" aria-label="{slotName(mk)}" style="left: {keyMenu.x}px; top: {keyMenu.y}px" onkeydown={menuKeydown}>
+        {#if keyMenu.pages}
+          <button role="menuitem" class="sub-back" onclick={() => showMenuPages(false)}>‹ Move to page</button>
+          {#each (layout?.pages ?? []).filter((g) => g.id !== layout?.page) as g}
+            <button role="menuitem" onclick={() => menuDo((k) => moveToPage(k, g))}>{g.name}</button>
+          {/each}
+        {:else if has}
+          <button role="menuitem" onclick={() => menuDo(loadKey)}>Edit key</button>
+          <button role="menuitem" onclick={() => menuDo(pressKey)}>Press now</button>
+          <hr />
+          <button role="menuitem" disabled={isFolder} onclick={() => menuDo(copyKey)}>Copy <kbd>Ctrl+C</kbd></button>
+          <button role="menuitem" disabled={!clipboardFull} onclick={() => menuDo(pasteKey)}>Paste <kbd>Ctrl+V</kbd></button>
+          <button role="menuitem" disabled={isFolder || nextFree(mk) === undefined} onclick={() => menuDo(duplicateKey)}>Duplicate to next free key</button>
+          {#if (layout?.pages.length ?? 0) > 1 || (layout?.path.length ?? 0) > 0}
+            <button role="menuitem" aria-haspopup="menu" onclick={() => showMenuPages(true)}
+              onkeydown={(e) => { if (e.key === "ArrowRight") { e.preventDefault(); showMenuPages(true); } }}>Move to page <span class="sub">›</span></button>
+          {/if}
+          <hr />
+          <button role="menuitem" class="danger" onclick={() => menuDo(removeKeyAt)}>Remove key <kbd>Del</kbd></button>
+        {:else}
+          <button role="menuitem" onclick={() => menuDo(loadKey)}>Pick an action</button>
+          <button role="menuitem" disabled={!clipboardFull} onclick={() => menuDo(pasteKey)}>Paste <kbd>Ctrl+V</kbd></button>
+        {/if}
       </div>
     {/if}
     <div class="statusbar" class:empty={!error && !toast && !notice}>

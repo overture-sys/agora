@@ -58,10 +58,18 @@ struct Settings {
     saver_gif: String,
     /// The temple builds itself on the dock when it connects.
     dock_intro: bool,
-    /// What the window shows when Agora opens: "agora", "video" or "off".
+    /// What the window shows when Agora opens: "update" (the temple, on the
+    /// first run and after an update), "agora" (every time), "video" or "off".
     intro: String,
     /// The user's own intro video (MP4 or WebM).
     intro_video: String,
+    /// The Agora version whose intro was last played, for "update".
+    intro_seen_version: String,
+    /// How long a key must be down to count as held, in milliseconds.
+    hold_ms: u64,
+    /// This Agora's version. Not saved; filled in for the window.
+    #[serde(skip_deserializing)]
+    app_version: String,
 }
 
 impl Default for Settings {
@@ -80,8 +88,11 @@ impl Default for Settings {
             saver_minutes: 10,
             saver_gif: String::new(),
             dock_intro: true,
-            intro: "agora".into(),
+            intro: "update".into(),
             intro_video: String::new(),
+            intro_seen_version: String::new(),
+            hold_ms: 500,
+            app_version: String::new(),
         }
     }
 }
@@ -285,7 +296,28 @@ fn set_brightness(state: State<Shared>, percent: u8) -> Result<(), String> {
 
 #[tauri::command]
 fn get_settings(state: State<Shared>) -> Settings {
-    state.lock().unwrap().settings.clone()
+    let mut s = state.lock().unwrap().settings.clone();
+    s.app_version = env!("CARGO_PKG_VERSION").into();
+    s
+}
+
+/// The window played the intro for this version.
+#[tauri::command]
+fn intro_played(state: State<Shared>) {
+    let mut dock = state.lock().unwrap();
+    dock.settings.intro_seen_version = env!("CARGO_PKG_VERSION").into();
+    save_settings(&dock.settings_path, &dock.settings);
+}
+
+#[tauri::command]
+fn set_hold_time(state: State<Shared>, host: State<Host>, ms: u64) -> Result<(), String> {
+    let ms = ms.clamp(300, 1000);
+    {
+        let mut dock = state.lock().unwrap();
+        dock.settings.hold_ms = ms;
+        save_settings(&dock.settings_path, &dock.settings);
+    }
+    with_host(&host, |h| h.set_hold_time(ms))
 }
 
 /// `color` is "#rrggbb". Lights the whole ring (and the two front LEDs).
@@ -399,6 +431,32 @@ fn clear_key(host: State<Host>, key: usize) -> Result<(), String> {
 #[tauri::command]
 fn move_key(host: State<Host>, from: usize, to: usize) -> Result<(), String> {
     with_host(&host, |h| h.move_key(from, to))
+}
+
+#[tauri::command]
+fn copy_key(host: State<Host>, key: usize) -> Result<(), String> {
+    with_host(&host, |h| h.copy(key))?
+}
+
+#[tauri::command]
+fn paste_key(host: State<Host>, key: usize) -> Result<(), String> {
+    with_host(&host, |h| h.paste(key))?
+}
+
+#[tauri::command]
+fn duplicate_key(host: State<Host>, from: usize, to: usize) -> Result<(), String> {
+    with_host(&host, |h| h.duplicate(from, to))?
+}
+
+#[tauri::command]
+fn move_key_to_page(host: State<Host>, key: usize, page: String) -> Result<usize, String> {
+    with_host(&host, |h| h.move_to_page(key, &page))?
+}
+
+/// Runs a key's action as if it were tapped on the dock.
+#[tauri::command]
+fn press_key(host: State<Host>, key: usize) -> Result<(), String> {
+    with_host(&host, |h| h.press(key))
 }
 
 /// Adds or removes Agora in Windows' list of apps that start at sign-in
@@ -623,7 +681,7 @@ fn preview_screen_saver(app: AppHandle, mode: String, gif: String) -> Result<(),
 
 #[tauri::command]
 fn set_intro(state: State<Shared>, intro: String, video: String, dock_intro: bool) -> Result<(), String> {
-    if !matches!(intro.as_str(), "agora" | "video" | "off") {
+    if !matches!(intro.as_str(), "update" | "agora" | "video" | "off") {
         return Err("Unknown intro".into());
     }
     let mut dock = state.lock().unwrap();
@@ -944,6 +1002,7 @@ fn restart_host(
         (dock.settings.use_vsd_craft_plugins, dock.current_model())
     };
     let (h, events) = start_host(app, use_vsd, model)?;
+    h.set_hold_time(shared.lock().unwrap().settings.hold_ms);
     if shared.lock().unwrap().worker.is_some() {
         h.device_connected(true);
     }
@@ -1477,6 +1536,13 @@ fn main() {
             key_info,
             place_action,
             clear_key,
+            copy_key,
+            paste_key,
+            duplicate_key,
+            move_key_to_page,
+            press_key,
+            intro_played,
+            set_hold_time,
             move_key,
             open_plugins_folder,
             open_plugin_folder,

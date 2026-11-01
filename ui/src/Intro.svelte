@@ -73,7 +73,7 @@
   .intro { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; background: var(--bg); cursor: pointer; transition: opacity .35s; }
   .intro.leaving { opacity: 0; }
   video { max-width: 100%; max-height: 100%; }
-  .tile { fill: #F3ECDF; stroke: #DDD0BA; stroke-width: 4; opacity: 0; animation: fade .4s ease-out forwards; }
+  .tile { fill: var(--panel); stroke: var(--line); stroke-width: 4; opacity: 0; animation: fade .4s ease-out forwards; }
   .roof { fill: #A94E26; opacity: 0; animation: drop .7s cubic-bezier(.2,.8,.3,1) .1s forwards; }
   .beam { fill: #A94E26; opacity: 0; animation: fade .3s ease-out .55s forwards; }
   .key { fill: #221C18; opacity: 0; transform: scale(.2); animation: pop .35s cubic-bezier(.3,1.5,.5,1) forwards; }

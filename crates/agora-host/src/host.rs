@@ -589,6 +589,16 @@ pub(crate) enum Msg {
     SetHold(usize, Vec<Value>),
     /// How an action the app ran went: ok or not, and text to show.
     ActionResult(String, bool, Option<String>),
+    /// Keeps a copy of a key's action for Paste.
+    Copy(usize, oneshot::Sender<Result<(), String>>),
+    /// Puts the copied action on a key, as a new action.
+    Paste(usize, oneshot::Sender<Result<(), String>>),
+    /// Copies the action on one key to another, without touching the copy.
+    Duplicate(usize, usize, oneshot::Sender<Result<(), String>>),
+    /// Moves a key's action to the first free key of another page.
+    MoveToPage(usize, String, oneshot::Sender<Result<usize, String>>),
+    /// How long a key must be down to count as held, in milliseconds.
+    HoldTime(u64),
 }
 
 /// The app's handle on a running host. Methods block briefly; call them from
@@ -663,6 +673,8 @@ impl HostHandle {
             hold_seq: 0,
             watches: HashMap::new(),
             results: HashMap::new(),
+            clipboard: None,
+            hold_time: HOLD,
         };
         runtime.spawn(state.run(rx));
         tx.send(Msg::AllFaces(true)).ok();
@@ -709,6 +721,42 @@ impl HostHandle {
     /// Moves the action on `from` to `to`. Whatever was on `to` swaps to `from`.
     pub fn move_key(&self, from: usize, to: usize) {
         let _ = self.tx.send(Msg::Move(from, to));
+    }
+
+    /// Keeps a copy of the action on `key` for [`HostHandle::paste`].
+    pub fn copy(&self, key: usize) -> Result<(), String> {
+        self.ask(|o| Msg::Copy(key, o))
+            .unwrap_or(Err("host stopped".into()))
+    }
+
+    /// Puts the copied action on `key`, replacing what was there.
+    pub fn paste(&self, key: usize) -> Result<(), String> {
+        self.ask(|o| Msg::Paste(key, o))
+            .unwrap_or(Err("host stopped".into()))
+    }
+
+    /// Puts a copy of the action on `from` on `to`.
+    pub fn duplicate(&self, from: usize, to: usize) -> Result<(), String> {
+        self.ask(|o| Msg::Duplicate(from, to, o))
+            .unwrap_or(Err("host stopped".into()))
+    }
+
+    /// Moves the action on `key` to the first free key of `page` (in the
+    /// active profile). Returns that key.
+    pub fn move_to_page(&self, key: usize, page: &str) -> Result<usize, String> {
+        self.ask(|o| Msg::MoveToPage(key, page.into(), o))
+            .unwrap_or(Err("host stopped".into()))
+    }
+
+    /// How long a key must be down to count as held (clamped to 200-2000 ms).
+    pub fn set_hold_time(&self, ms: u64) {
+        let _ = self.tx.send(Msg::HoldTime(ms));
+    }
+
+    /// Presses and lets go of a key, as a tap.
+    pub fn press(&self, key: usize) {
+        let _ = self.tx.send(Msg::Key(key, true));
+        let _ = self.tx.send(Msg::Key(key, false));
     }
 
     pub fn key(&self, key: usize, pressed: bool) {
@@ -862,6 +910,10 @@ struct State {
     watches: HashMap<String, Watch>,
     /// Text an action sent back (Run command), by context, shown as title.
     results: HashMap<String, String>,
+    /// The action Copy kept, for Paste.
+    clipboard: Option<Instance>,
+    /// How long a key must be down to count as held.
+    hold_time: Duration,
 }
 
 /// A running or paused timer or stopwatch.
@@ -1149,11 +1201,14 @@ impl State {
         // A removal can be undone until something else changes the layout.
         match &msg {
             Msg::Clear(_)
+            | Msg::Paste(..)
             | Msg::SetHidden(_, true)
             | Msg::Layout(LayoutOp::RemovePage(_) | LayoutOp::RemoveProfile(_), _) => {
                 self.undo = Some(self.layout.clone());
             }
             Msg::Place(..)
+            | Msg::Duplicate(..)
+            | Msg::MoveToPage(..)
             | Msg::Move(..)
             | Msg::SetHidden(_, false)
             | Msg::Forget(..)
@@ -1216,6 +1271,40 @@ impl State {
             }
             Msg::Clear(key) => self.clear(key),
             Msg::Move(from, to) => self.move_key(from, to),
+            Msg::Copy(key, done) => {
+                let r = match self.layout.keys().get(&key) {
+                    None => Err("That key is empty.".into()),
+                    Some(i) if i.is_builtin(builtin::FOLDER) => {
+                        Err("Folders can't be copied. Move them instead.".into())
+                    }
+                    Some(i) => {
+                        self.clipboard = Some(i.clone());
+                        Ok(())
+                    }
+                };
+                let _ = done.send(r);
+            }
+            Msg::Paste(key, done) => {
+                let r = match self.clipboard.clone() {
+                    None => Err("Nothing copied yet.".into()),
+                    Some(inst) => self.put_copy(key, inst),
+                };
+                let _ = done.send(r);
+            }
+            Msg::Duplicate(from, to, done) => {
+                let r = match self.layout.keys().get(&from).cloned() {
+                    None => Err("That key is empty.".into()),
+                    Some(i) if i.is_builtin(builtin::FOLDER) => {
+                        Err("Folders can't be copied. Move them instead.".into())
+                    }
+                    Some(inst) => self.put_copy(to, inst),
+                };
+                let _ = done.send(r);
+            }
+            Msg::MoveToPage(key, page, done) => {
+                let _ = done.send(self.move_to_page(key, &page));
+            }
+            Msg::HoldTime(ms) => self.hold_time = Duration::from_millis(ms.clamp(200, 2000)),
             Msg::SetHidden(uuid, hidden) => {
                 if hidden {
                     self.clear_plugin_keys(&uuid);
@@ -1934,6 +2023,93 @@ impl State {
         }
     }
 
+    /// Puts a copy of `inst` on `key` as a new action with its own context.
+    fn put_copy(&mut self, key: usize, inst: Instance) -> Result<(), String> {
+        if !self.slot_exists(key) {
+            return Err(format!("no key {key}"));
+        }
+        let controller = if slot(key) == Slot::Dial {
+            "Encoder"
+        } else {
+            "Keypad"
+        };
+        if !self.fits(&inst.plugin, &inst.action, controller) {
+            return Err(if controller == "Encoder" {
+                "That action can't go on a knob.".into()
+            } else {
+                "That action is made for knobs.".into()
+            });
+        }
+        if inst.plugin != BUILTIN && !self.plugins.contains_key(&inst.plugin) {
+            return Err("The plugin for that action isn't installed any more.".into());
+        }
+        let mut copy = inst;
+        copy.context = new_context();
+        copy.images.clear();
+        copy.titles.clear();
+        let plugin = copy.plugin.clone();
+        self.clear(key);
+        self.layout.keys_mut().insert(key, copy);
+        self.dirty = true;
+        self.redraw(key);
+        if plugin != BUILTIN {
+            if self.plugin_conn.contains_key(&plugin) {
+                self.appear(key);
+            } else {
+                self.ensure_running(&plugin);
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves the action on `key` to the first free key of another page in
+    /// this profile. Knobs and side buttons keep their place on the new page.
+    fn move_to_page(&mut self, key: usize, page: &str) -> Result<usize, String> {
+        let Some(inst) = self.layout.keys().get(&key).cloned() else {
+            return Err("That key is empty.".into());
+        };
+        let here = self.layout.page().id.clone();
+        if page == here {
+            return Err("That key is already on this page.".into());
+        }
+        let profile = self.layout.profile();
+        let Some(target) = profile.page(page) else {
+            return Err("No such page.".into());
+        };
+        let folder_page = inst
+            .is_builtin(builtin::FOLDER)
+            .then(|| inst.settings.get("page").and_then(Value::as_str).map(String::from))
+            .flatten();
+        if let Some(fp) = &folder_page {
+            if profile.subtree(fp).iter().any(|p| p == page) {
+                return Err("A folder can't go inside itself.".into());
+            }
+        }
+        let free = if slot(key) == Slot::Key {
+            let d = &self.config.device;
+            (0..d.rows * d.columns).find(|k| !target.keys.contains_key(k))
+        } else {
+            (!target.keys.contains_key(&key)).then_some(key)
+        };
+        let Some(to) = free else {
+            return Err("That page has no free key.".into());
+        };
+        self.send_instance(key, "willDisappear", json!({}));
+        self.layout.keys_mut().remove(&key);
+        self.show(key, Face::default());
+        let p = self.layout.profile_mut();
+        if let Some(fp) = &folder_page {
+            if let Some(g) = p.pages.iter_mut().find(|g| &g.id == fp) {
+                g.parent = Some(page.to_string());
+            }
+        }
+        if let Some(g) = p.pages.iter_mut().find(|g| g.id == page) {
+            g.keys.insert(to, inst);
+        }
+        self.dirty = true;
+        Ok(to)
+    }
+
     fn appear(&mut self, key: usize) {
         self.send_instance(key, "willAppear", json!({}));
         self.send_title_params(key);
@@ -1999,8 +2175,9 @@ impl State {
             let seq = self.hold_seq;
             self.holding.insert(key, (seq, false));
             let tx = self.tx.clone();
+            let hold_time = self.hold_time;
             tokio::spawn(async move {
-                tokio::time::sleep(HOLD).await;
+                tokio::time::sleep(hold_time).await;
                 let _ = tx.send(Msg::HoldTimer(key, seq));
             });
             return;

@@ -43,6 +43,9 @@
     color-scheme: dark;
   }
 }
+/* On dark marble the black keys need an edge to stand out. */
+:root[data-theme="dark"] .key:not(.selected):not(.drop) { border-color: #3A3027; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .key:not(.selected):not(.drop) { border-color: #3A3027; } }
 :root[data-theme="dark"] {
   --bg: #15110E; --panel: #201A15; --text: #EDE3D0; --muted: #A69783; --line: #3A3027; --control: #7A6B5A;
   --key: #0D0A08; --key-text: #E8A766; --accent: #D9794A; --on-accent: #15110E; --pressed: #E8BC62;
@@ -120,13 +123,13 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
 
 /* Keys */
 .keys-page { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(320px, 400px); gap: 16px; flex: 1; min-height: 0; }
-.keys-page .side { max-height: calc(100vh - 40px); }
+.keys-page .side { position: sticky; top: 0; height: calc(100vh - 86px); overflow: auto; }
 .keys-page .device { align-self: start; }
 /* The slab of keys */
 .device, .hero-dock { display: flex; flex-direction: column; align-items: center; gap: 18px; position: relative; padding: 24px 16px 20px; }
 .device .meander { position: absolute; left: 12px; right: 12px; top: 7px; height: 10px; }
 .grid {
-  display: grid; gap: 10px; width: 100%; max-width: 480px; padding: 12px; border-radius: 12px;
+  display: grid; gap: 10px; width: 100%; max-width: 600px; padding: 12px; border-radius: 12px;
   background: color-mix(in srgb, var(--line) 45%, var(--panel)); box-shadow: inset 0 1px 3px rgba(0,0,0,.12);
 }
 .key {
@@ -141,7 +144,12 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
 .key.selected { border-color: var(--pressed); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pressed) 30%, transparent), inset 0 2px 6px rgba(0,0,0,.55); }
 .key.pressed { transform: scale(.94); box-shadow: inset 0 0 14px color-mix(in srgb, var(--pressed) 70%, transparent); }
 .key.drop { border-color: var(--blue); border-style: dashed; transform: scale(1.04); }
-.key:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.key:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, .search:focus-visible, summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* A key with a hold action: a gilded corner. */
+.key.held::after, .round.held::after {
+  content: ""; position: absolute; top: 0; right: 0; width: 14px; height: 14px; pointer-events: none;
+  background: linear-gradient(225deg, var(--pressed) 0 50%, transparent 50%);
+}
 .buttons { display: flex; gap: 40px; }
 /* Buttons and knobs: places for actions too, but with no screen of their own. */
 .round, .knob {
@@ -155,7 +163,7 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
 .round.pressed, .knob.pressed { border-color: var(--pressed); background: color-mix(in srgb, var(--pressed) 40%, var(--key)); transform: scale(.94); }
 .round.selected, .knob.selected { border-color: var(--pressed); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pressed) 30%, transparent); }
 .round.drop, .knob.drop { border-color: var(--blue); border-style: dashed; }
-.dials { display: grid; gap: 10px; width: 100%; max-width: 480px; justify-items: center; }
+.dials { display: grid; gap: 10px; width: 100%; max-width: 600px; justify-items: center; }
 .dial { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; }
 /* The N4's strip: one wide screen per knob. */
 .segment { width: 100%; aspect-ratio: 176 / 124; border-radius: 6px; background: var(--key); overflow: hidden; display: flex; justify-content: center; box-shadow: inset 0 2px 6px rgba(0,0,0,.55); }
@@ -163,8 +171,18 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
 
 
 /* Dock */
-.dock-page { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
-.dock-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.dock-page { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: stretch; }
+.dock-page > section { display: flex; flex-direction: column; gap: 4px; }
+.model-line { margin: -4px 0 4px; }
+.saver { margin: 14px 0 0; gap: 8px; }
+.field-label { font-size: 13px; color: var(--muted); }
+.saver-row { display: flex; align-items: center; gap: 8px; }
+.saver-row select { flex: 1; min-width: 0; }
+.form .saver-row input[type="number"] { width: 72px; }
+.saver-row .after { font-size: 13px; color: var(--muted); }
+.settings-page { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; max-width: 1100px; }
+.settings-page .slider { margin-top: 0; }
+.settings-page p { margin: 8px 0 0; }
 .slider { display: flex; flex-direction: column; gap: 10px; font-size: 13px; margin-top: 8px; }
 .slider b { font-weight: 600; color: var(--accent); }
 input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--accent) var(--fill, 80%), var(--line) var(--fill, 80%)); }
@@ -185,7 +203,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 18p
 .switch-row > span { display: flex; flex-direction: column; gap: 2px; }
 input[role="switch"] {
   -webkit-appearance: none; appearance: none; flex: none; width: 38px; height: 22px; border-radius: 11px; margin: 0;
-  background: var(--line); position: relative; cursor: pointer; transition: background 120ms;
+  background: var(--control); position: relative; cursor: pointer; transition: background 120ms;
 }
 input[role="switch"]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--panel); transition: left 120ms; }
 input[role="switch"]:checked { background: var(--ok); }
@@ -213,6 +231,14 @@ button.link { border: none; background: none; padding: 0; min-height: 0; font-si
 
 /* Side hall: action list or settings panel */
 .side { display: flex; flex-direction: column; min-height: 0; gap: 8px; padding-top: 0; overflow: hidden; }
+.side .actions { min-height: 160px; }
+/* The key editor's header: back, then the key, then what you can do with it. */
+.editor-head { display: flex; flex-direction: column; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.editor-head h2 { margin: 0; font-size: 17px; letter-spacing: .06em; }
+.editor-head h2 .item { font-family: var(--body); font-weight: 600; letter-spacing: 0; }
+.editor-head .back { align-self: flex-start; font-size: 13px; text-decoration: none; }
+.editor-head .back:hover { text-decoration: underline; }
+.editor-actions .push { margin-left: auto; }
 .side > .triglyph { margin: 0 -16px 6px; }
 .side-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
 .side-head h2 { margin: 0; font-family: var(--display); font-size: 16px; font-weight: 400; letter-spacing: .06em; }
@@ -223,7 +249,7 @@ button.link { border: none; background: none; padding: 0; min-height: 0; font-si
   width: 100%; font: inherit; font-size: 14px; padding: 7px 10px 7px 30px; border-radius: 6px; border: 1px solid var(--control); color: var(--text);
   background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23998877' stroke-width='2.4'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-4-4'/%3E%3C/svg%3E") no-repeat 10px center;
 }
-.search:focus { border-color: var(--blue); outline: none; }
+.search:focus { border-color: var(--blue); }
 .actions { overflow: auto; min-height: 0; flex: 1; }
 .actions::-webkit-scrollbar, .lines::-webkit-scrollbar, .left::-webkit-scrollbar { width: 10px; }
 .actions::-webkit-scrollbar-thumb, .lines::-webkit-scrollbar-thumb, .left::-webkit-scrollbar-thumb {
@@ -244,7 +270,10 @@ button.link { border: none; background: none; padding: 0; min-height: 0; font-si
 .pi { flex: 1; width: 100%; min-height: 300px; border: 1px solid var(--line); border-radius: 8px; background: var(--pi-bg); }
 
 /* Keys overview */
-.key-list { display: flex; flex-direction: column; gap: 2px; max-height: 40%; overflow: auto; flex: none; }
+.key-list { display: flex; flex-direction: column; gap: 2px; width: 100%; max-width: 600px; border-top: 1px solid var(--line); padding-top: 10px; }
+.key-list h3 { margin: 0 0 6px; font-family: var(--display); font-weight: 400; font-size: 14px; letter-spacing: .08em; display: flex; justify-content: space-between; align-items: baseline; }
+.key-row.current { background: var(--bg); box-shadow: inset 3px 0 0 var(--pressed); }
+.hold-note { color: var(--accent); }
 .key-row-wrap { display: flex; align-items: center; gap: 6px; }
 .key-row { min-height: 0; display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: none; background: transparent; padding: 5px 6px; border-radius: 6px; }
 .key-row:hover { background: var(--bg); }
@@ -275,7 +304,7 @@ button.link { border: none; background: none; padding: 0; min-height: 0; font-si
 @media (prefers-reduced-motion: reduce) { .key, .chevron, .card, input[role="switch"], input[role="switch"]::after { transition: none; } }
 
 /* Profiles, pages and folders above the keys */
-.pagebar { width: 100%; max-width: 480px; display: flex; flex-direction: column; gap: 10px; }
+.pagebar { width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 10px; }
 .profile-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .profile-row .label { font-family: var(--display); letter-spacing: .08em; color: var(--muted); margin-right: 2px; }
 .profile-row select { flex: 1; min-width: 120px; }
@@ -293,7 +322,10 @@ button.link { border: none; background: none; padding: 0; min-height: 0; font-si
 .tab:hover { background: var(--bg); }
 .tab.active { background: var(--panel); border-color: var(--line); color: var(--accent); box-shadow: inset 0 3px 0 var(--accent); }
 .tab.add { color: var(--muted); }
-.tab.remove { color: var(--bad); margin-left: auto; font-family: var(--body); font-size: 13px; }
+.tab-edit.bad:hover { color: var(--bad); }
+.more-wrap { position: relative; }
+.more { font-weight: 700; letter-spacing: .1em; }
+.drop-menu { position: absolute; right: 0; top: calc(100% + 4px); min-width: 210px; }
 .tab-input { width: 120px; margin-bottom: 2px; }
 .rename { font: inherit; }
 .crumbs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
@@ -378,5 +410,9 @@ button.on { border-color: var(--accent); color: var(--accent); }
   border: 0; background: none; text-align: left; padding: 7px 10px; border-radius: 5px; min-height: 0;
   font-size: 14px; color: var(--text); cursor: pointer;
 }
-.key-menu button:hover, .key-menu button:focus-visible { background: var(--hover, rgba(127, 127, 127, 0.15)); }
-.key-menu button.danger { color: var(--danger, #b3402a); }
+.key-menu button { display: flex; align-items: center; gap: 12px; }
+.key-menu button:hover:not(:disabled), .key-menu button:focus-visible { background: var(--bg); outline: none; box-shadow: inset 2px 0 0 var(--blue); }
+.key-menu button.danger { color: var(--bad); }
+.key-menu kbd, .key-menu .sub { margin-left: auto; font-family: var(--body); font-size: 12px; color: var(--muted); }
+.key-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.key-menu .sub-back { color: var(--muted); font-size: 13px; }

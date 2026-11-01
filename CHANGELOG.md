@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.6
+
+Fixes from the design panel's review of 0.7.4.
+
+- New Settings page: theme, Start with Windows, the window intro and the hold time. The Dock page is now two even cards, Screen and Light ring, with the screen saver on one row.
+- Key editor header: "← All keys (Esc)", the key's name, then Change action, Press now and Remove.
+- Right-click menu works from the keyboard (Shift+F10 or the menu key, arrows, Home/End, Esc) and on empty keys. New items: Press now, Copy, Paste, Duplicate to next free key and Move to page. Delete removes the selected key, Ctrl+C / Ctrl+V copy and paste it.
+- Keys with a hold action show a gilded corner and "hold: …" in the key list. "When held" sits under the action's settings. Hold time can be set from 0.3 to 1 s.
+- Profile row: Profile, New and a ⋯ menu (Rename, Apps, Import, Delete). Deleting a page is an icon on its tab. Bigger key grid with the key list under it.
+- Better contrast and focus outlines: switch tracks, menus, selects, text areas and search; dark keys get an edge; ring buttons report their state.
+- On 5 x 3 docks the big clock, temple and starfield are drawn key by key (one digit per key, the temple on the middle keys, twinkling stars on every key).
+- The window intro now plays after an update by default (or every time, your video, or nothing) and is skipped when Windows asks for fewer animations.
+
 ## 0.7.5 beta (2026-11-01)
 
 - Security: Agora's local plugin server now only answers Agora's own pages and programs on this PC. A website open in your browser can't reach it, by its Origin or by a rebound domain name.

@@ -102,12 +102,13 @@ fn finish(app: &AppHandle) {
 fn play(shared: &Shared, model: &'static Model, gen: u64, show: Show) {
     let size = model.key_size();
     let (w, h) = (size * model.columns as u32, size * model.rows as u32);
+    let grid = Grid { cols: model.columns as u32, rows: model.rows as u32, size };
     let mut painter: Box<dyn Painter> = match &show {
-        Show::Intro => Box::new(Temple { intro: true }),
+        Show::Intro => Box::new(Temple { intro: true, grid }),
         Show::Saver { mode, gif } => match mode.as_str() {
-            "temple" => Box::new(Temple { intro: false }),
-            "stars" => Box::new(Stars::new()),
-            "clock" => Box::new(BigClock),
+            "temple" => Box::new(Temple { intro: false, grid }),
+            "stars" => Box::new(Stars::new(grid)),
+            "clock" => Box::new(BigClock { grid }),
             "gif" => match Gif::open(gif, w, h) {
                 Some(g) => Box::new(g),
                 None => Box::new(Matrix::new(w, h)),
@@ -144,6 +145,26 @@ fn play(shared: &Shared, model: &'static Model, gen: u64, show: Show) {
         }
         frame += 1;
         std::thread::sleep(wait.saturating_sub(started.elapsed()));
+    }
+}
+
+/// The dock's keys: how many across and down, and each one's size in the
+/// canvas. Shows that draw key by key use it; the canvas is the whole dock.
+#[derive(Clone, Copy)]
+struct Grid {
+    cols: u32,
+    rows: u32,
+    size: u32,
+}
+
+impl Grid {
+    /// The 5 x 3 dock (M18 and alike), which has its own key-by-key layouts.
+    fn five_by_three(&self) -> bool {
+        self.cols == 5 && self.rows == 3
+    }
+    /// Top-left corner of key `i` (counted across, then down).
+    fn origin(&self, i: u32) -> (u32, u32) {
+        ((i % self.cols) * self.size, (i / self.cols) * self.size)
     }
 }
 
@@ -286,6 +307,53 @@ impl Painter for Matrix {
 
 struct Temple {
     intro: bool,
+    grid: Grid,
+}
+
+/// The temple drawn key by key on a 5 x 3 dock: the pediment across the
+/// top row's middle three keys, and the six keys of the icon on keys 7-9
+/// and 12-14, the gold one on key 8.
+fn temple_keys_svg(g: Grid, t: f32, gold: usize, glow: f32) -> String {
+    let ease = |a: f32, b: f32| ((t - a) / (b - a)).clamp(0.0, 1.0);
+    let out = |x: f32| 1.0 - (1.0 - x).powi(3);
+    let (w, h, s) = (g.cols * g.size, g.rows * g.size, g.size as f32);
+    let roof = out(ease(0.0, 0.7));
+    let beam = ease(0.5, 0.9);
+    let mut body = String::new();
+    // Pediment: from key 2's left edge to key 4's right edge, on the top row.
+    let (l, r, top, base) = (s * 1.08, s * 3.92, s * 0.22, s * 0.78);
+    let drop = -s * (1.0 - roof);
+    body.push_str(&format!(
+        r##"<polygon points="{:.1},{:.1} {:.1},{:.1} {:.1},{:.1}" fill="#A94E26" opacity="{roof:.2}"/>"##,
+        (l + r) / 2.0, top + drop, r, base + drop, l, base + drop
+    ));
+    body.push_str(&format!(
+        r##"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" rx="3" fill="#A94E26" opacity="{beam:.2}"/>"##,
+        l, s * 0.84, r - l, s * 0.1
+    ));
+    for (n, key) in [6u32, 7, 8, 11, 12, 13].into_iter().enumerate() {
+        let appear = out(ease(0.8 + n as f32 * 0.12, 1.1 + n as f32 * 0.12));
+        if appear <= 0.0 {
+            continue;
+        }
+        let (x0, y0) = g.origin(key);
+        let side = s * 0.78 * appear;
+        let (x, y) = (x0 as f32 + (s - side) / 2.0, y0 as f32 + (s - side) / 2.0);
+        let fill = if n == gold { "#D9A441" } else { "#3A302A" };
+        body.push_str(&format!(
+            r##"<rect x="{x:.1}" y="{y:.1}" width="{side:.1}" height="{side:.1}" rx="{:.1}" fill="{fill}"/>"##,
+            side * 0.18
+        ));
+        if n == gold && glow > 0.0 {
+            body.push_str(&format!(
+                r##"<rect x="{x:.1}" y="{y:.1}" width="{side:.1}" height="{side:.1}" rx="{:.1}" fill="#FFF3C4" opacity="{glow:.2}"/>"##,
+                side * 0.18
+            ));
+        }
+    }
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><rect width="{w}" height="{h}" fill="#14110E"/>{body}</svg>"##
+    )
 }
 
 /// The icon's shapes on a dark ground, at time `t` of the build. `gold` is
@@ -332,12 +400,20 @@ impl Painter for Temple {
                 return None;
             }
             let glow = if t > 1.7 { ((t - 1.7) * std::f32::consts::PI / 0.8).sin().max(0.0) * 0.6 } else { 0.0 };
-            temple_svg(t, 1, glow)
+            if self.grid.five_by_three() {
+                temple_keys_svg(self.grid, t, 1, glow)
+            } else {
+                temple_svg(t, 1, glow)
+            }
         } else {
             // Built, with the gold moving from key to key.
             let gold = ((t / 1.5) as usize * 5 + 1) % 6;
             let glow = ((t % 1.5) * std::f32::consts::PI / 1.5).sin() * 0.35;
-            temple_svg(10.0, gold, glow)
+            if self.grid.five_by_three() {
+                temple_keys_svg(self.grid, 10.0, gold, glow)
+            } else {
+                temple_svg(10.0, gold, glow)
+            }
         };
         let wait = if self.intro { 50 } else { 120 };
         Some((face::render_svg(&svg, w, h), Duration::from_millis(wait)))
@@ -349,22 +425,56 @@ impl Painter for Temple {
 struct Stars {
     rng: Rng,
     stars: Vec<[f32; 3]>,
+    /// Still stars, at least three on every key, that twinkle: x, y, speed, phase.
+    twinkles: Vec<[f32; 4]>,
 }
 
 impl Stars {
-    fn new() -> Self {
+    fn new(g: Grid) -> Self {
         let mut rng = Rng::new();
         let stars = (0..260)
             .map(|_| [rng.unit() * 2.0 - 1.0, rng.unit() * 2.0 - 1.0, rng.unit()])
             .collect();
-        Stars { rng, stars }
+        let mut twinkles = Vec::new();
+        let s = g.size as f32;
+        for key in 0..g.cols * g.rows {
+            let (x0, y0) = g.origin(key);
+            for _ in 0..3 + (rng.next() % 2) as usize {
+                twinkles.push([
+                    x0 as f32 + s * (0.12 + rng.unit() * 0.76),
+                    y0 as f32 + s * (0.12 + rng.unit() * 0.76),
+                    1.5 + rng.unit() * 3.0,
+                    rng.unit() * std::f32::consts::TAU,
+                ]);
+            }
+        }
+        Stars { rng, stars, twinkles }
+    }
+}
+
+/// A square star of `size` pixels, if it's on the canvas.
+fn dot(img: &mut RgbaImage, x: f32, y: f32, size: i64, c: [u8; 3]) {
+    let (w, h) = (img.width() as i64, img.height() as i64);
+    for dx in 0..size {
+        for dy in 0..size {
+            let (px, py) = (x as i64 + dx, y as i64 + dy);
+            if px >= 0 && py >= 0 && px < w && py < h {
+                img.put_pixel(px as u32, py as u32, Rgba([c[0], c[1], c[2], 255]));
+            }
+        }
     }
 }
 
 impl Painter for Stars {
-    fn paint(&mut self, w: u32, h: u32, _t: Duration, _frame: u64) -> Option<(RgbaImage, Duration)> {
+    fn paint(&mut self, w: u32, h: u32, t: Duration, _frame: u64) -> Option<(RgbaImage, Duration)> {
         let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255]));
         let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let secs = t.as_secs_f32();
+        for tw in &self.twinkles {
+            let k = 0.5 + 0.5 * (secs * tw[2] + tw[3]).sin();
+            let b = (60.0 + 195.0 * k) as u8;
+            dot(&mut img, tw[0], tw[1], if k > 0.8 { 3 } else { 2 }, [b, b, b.saturating_add(25)]);
+        }
         for s in &mut self.stars {
             s[2] -= 0.015;
             if s[2] <= 0.02 {
@@ -373,15 +483,8 @@ impl Painter for Stars {
             let x = cx + s[0] / s[2] * cx * 0.5;
             let y = cy + s[1] / s[2] * cy * 0.5;
             let bright = ((1.0 - s[2]) * 1.6).min(1.0).mul_add(225.0, 30.0) as u8;
-            let size = if s[2] < 0.3 { 2 } else { 1 };
-            for dx in 0..size {
-                for dy in 0..size {
-                    let (px, py) = (x as i64 + dx, y as i64 + dy);
-                    if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
-                        img.put_pixel(px as u32, py as u32, Rgba([bright, bright, bright.saturating_add(20), 255]));
-                    }
-                }
-            }
+            let size = if s[2] < 0.3 { 3 } else { 2 };
+            dot(&mut img, x, y, size, [bright, bright, bright.saturating_add(20)]);
         }
         Some((img, Duration::from_millis(60)))
     }
@@ -389,11 +492,53 @@ impl Painter for Stars {
 
 // ---- Big clock ------------------------------------------------------------
 
-struct BigClock;
+struct BigClock {
+    grid: Grid,
+}
+
+/// One glyph or word, centred on key `key`.
+fn key_text(g: Grid, key: u32, text: &str, size: f32, weight: u32, fill: &str) -> String {
+    let (x0, y0) = g.origin(key);
+    let s = g.size as f32;
+    format!(
+        r##"<text x="{:.1}" y="{:.1}" font-family="sans-serif" font-size="{:.1}" font-weight="{weight}" text-anchor="middle" fill="{fill}">{text}</text>"##,
+        x0 as f32 + s / 2.0,
+        y0 as f32 + s / 2.0 + size * 0.36,
+        size
+    )
+}
+
+/// The clock key by key on a 5 x 3 dock: the weekday on the top row's
+/// middle keys, H H : M M across the middle row, the date on the bottom row.
+fn clock_keys_svg(g: Grid, now: chrono::DateTime<chrono::Local>) -> String {
+    let (w, h, s) = (g.cols * g.size, g.rows * g.size, g.size as f32);
+    let mut body = String::new();
+    let day = now.format("%a").to_string().to_uppercase();
+    for (i, c) in day.chars().take(3).enumerate() {
+        body.push_str(&key_text(g, 1 + i as u32, &c.to_string(), s * 0.5, 600, "#c9b79c"));
+    }
+    let hm = now.format("%H%M").to_string();
+    let digits: Vec<char> = hm.chars().collect();
+    for (key, d) in [(5u32, digits[0]), (6, digits[1]), (8, digits[2]), (9, digits[3])] {
+        body.push_str(&key_text(g, key, &d.to_string(), s * 0.82, 700, "#f3ecdf"));
+    }
+    // The colon blinks with the seconds.
+    let colon = if now.timestamp() % 2 == 0 { "#D9A441" } else { "#4a3f35" };
+    body.push_str(&key_text(g, 7, ":", s * 0.82, 700, colon));
+    body.push_str(&key_text(g, 11, &now.format("%-d").to_string(), s * 0.5, 600, "#c9b79c"));
+    body.push_str(&key_text(g, 12, &now.format("%b").to_string().to_uppercase(), s * 0.36, 600, "#c9b79c"));
+    body.push_str(&key_text(g, 13, &now.format("%Y").to_string(), s * 0.3, 600, "#8a7b68"));
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><rect width="{w}" height="{h}" fill="#000"/>{body}</svg>"##
+    )
+}
 
 impl Painter for BigClock {
     fn paint(&mut self, w: u32, h: u32, _t: Duration, _frame: u64) -> Option<(RgbaImage, Duration)> {
         let now = chrono::Local::now();
+        if self.grid.five_by_three() {
+            return Some((face::render_svg(&clock_keys_svg(self.grid, now), w, h), Duration::from_millis(500)));
+        }
         let svg = format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><rect width="{w}" height="{h}" fill="#000"/><text x="{}" y="{}" font-family="sans-serif" font-size="{}" font-weight="700" text-anchor="middle" fill="#f3ecdf">{}</text><text x="{}" y="{}" font-family="sans-serif" font-size="{}" font-weight="600" text-anchor="middle" fill="#c9b79c">{}</text></svg>"##,
             w / 2,
@@ -470,12 +615,16 @@ mod tests {
     #[test]
     fn every_show_paints_a_dock_sized_frame() {
         let (w, h) = (320, 192);
+        let g = Grid { cols: 5, rows: 3, size: 64 };
+        let other = Grid { cols: 4, rows: 2, size: 80 };
         let mut painters: Vec<Box<dyn Painter>> = vec![
             Box::new(Matrix::new(w, h)),
-            Box::new(Temple { intro: true }),
-            Box::new(Temple { intro: false }),
-            Box::new(Stars::new()),
-            Box::new(BigClock),
+            Box::new(Temple { intro: true, grid: g }),
+            Box::new(Temple { intro: false, grid: g }),
+            Box::new(Temple { intro: false, grid: other }),
+            Box::new(Stars::new(g)),
+            Box::new(BigClock { grid: g }),
+            Box::new(BigClock { grid: other }),
         ];
         for p in &mut painters {
             for f in 0..3 {
@@ -484,7 +633,7 @@ mod tests {
             }
         }
         // The intro ends by itself.
-        assert!(Temple { intro: true }.paint(w, h, Duration::from_secs(3), 0).is_none());
+        assert!(Temple { intro: true, grid: g }.paint(w, h, Duration::from_secs(3), 0).is_none());
     }
 
     #[test]
@@ -508,6 +657,7 @@ mod look {
     #[ignore]
     fn dump_frames() {
         let (w, h) = (320, 192);
+        let g = Grid { cols: 5, rows: 3, size: 64 };
         std::fs::create_dir_all("/tmp/agora-shows").unwrap();
         let mut m = Matrix::new(w, h);
         for f in 0..30 {
@@ -517,16 +667,17 @@ mod look {
             }
         }
         for (name, t) in [("intro-0.4", 0.4), ("intro-1.2", 1.2), ("intro-2.0", 2.0)] {
-            let (img, _) = Temple { intro: true }.paint(w, h, Duration::from_secs_f32(t), 0).unwrap();
+            let (img, _) = Temple { intro: true, grid: g }.paint(w, h, Duration::from_secs_f32(t), 0).unwrap();
             img.save(format!("/tmp/agora-shows/{name}.png")).unwrap();
         }
-        let mut s = Stars::new();
+        let mut s = Stars::new(g);
         for f in 0..40 {
             let (img, _) = s.paint(w, h, Duration::ZERO, f).unwrap();
             if f == 39 {
                 img.save("/tmp/agora-shows/stars.png").unwrap();
             }
         }
-        BigClock.paint(w, h, Duration::ZERO, 0).unwrap().0.save("/tmp/agora-shows/clock.png").unwrap();
+        BigClock { grid: g }.paint(w, h, Duration::ZERO, 0).unwrap().0.save("/tmp/agora-shows/clock.png").unwrap();
+        Temple { intro: false, grid: g }.paint(w, h, Duration::from_secs(1), 0).unwrap().0.save("/tmp/agora-shows/temple.png").unwrap();
     }
 }

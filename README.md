@@ -2,15 +2,13 @@
 
 ![Agora for Stream Dock](assets/agora-preview-16x9.png)
 
-A free, open-source (MIT) app for VSDinside / Mirabox Stream Dock devices: a lighter, faster replacement for VSD Craft that runs your existing Stream Dock plugins unchanged.
+A free, open-source (MIT) app for VSDinside / Mirabox Stream Dock devices: a replacement for VSD Craft that runs your existing Stream Dock plugins unchanged.
 
 > **Beta. Tested on the Stream Dock M18 only.** The other models below are built from public notes and haven't been tried on real hardware yet. If you have one, please try it and open an issue saying what works and what doesn't.
 >
 > Not made by or affiliated with VSDinside, Mirabox or HotSpot.
 
 If Agora is useful to you, you can support it on [Ko-fi](https://ko-fi.com/overturesys).
-
-"About 3× lighter" comes from one idle test on a Stream Dock M18 (2026-10-31): Agora and its window used 394 MB of memory, VSD Craft and its browser processes 1,242 MB, before plugins.
 
 ## Install (Windows 10 or 11)
 1. Download `Agora-<version>-setup.exe` from the [releases page](https://gitlab.com/overture-group1/agora/-/releases).

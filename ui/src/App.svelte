@@ -1705,6 +1705,7 @@
       </section>
     {:else}
       <div class="dock-page">
+        <div class="dock-col">
         <section class="screen-card">
           <h2>Screen</h2>
           <p class="muted small">{status.model_name}{status.connected ? "" : " (last connected)"}{#if !status.tested}. Agora hasn't been tried on this model yet. <button class="link" onclick={() => call("open_link", { which: "issues" })}>Tell us what works and what doesn't</button>.{/if}</p>
@@ -1721,6 +1722,58 @@
           </label>
         </section>
 
+        <section class="screen-card">
+          <h2>Screen saver</h2>
+          <div class="form">
+            <label>On the dock
+              <select value={settings.saver ?? "off"} onchange={(e) => saveSaver({ saver: e.currentTarget.value })}>
+                {#each savers as sv}<option value={sv.id}>{sv.name}</option>{/each}
+              </select>
+            </label>
+            {#if (settings.saver ?? "off") !== "off"}
+              <label>Start after (minutes unused) <input type="number" min="1" max="240" value={settings.saver_minutes ?? 10} onchange={(e) => saveSaver({ saver_minutes: Number(e.currentTarget.value) })} /></label>
+            {/if}
+            {#if settings.saver === "gif"}
+              <label>GIF
+                <span class="row grow"><input value={settings.saver_gif ?? ""} placeholder="C:\Pictures\loop.gif" onchange={(e) => saveSaver({ saver_gif: e.currentTarget.value })} />
+                  <button onclick={async () => { const p = await pickFile("Choose a GIF", "GIF", ["gif"]); if (p) saveSaver({ saver_gif: p }); }}>File…</button></span>
+              </label>
+              <p class="muted small">It's stretched across all the keys, cropped to fit.</p>
+            {/if}
+            {#if (settings.saver ?? "off") !== "off"}
+              <div class="row"><button onclick={() => call("preview_screen_saver", { mode: settings.saver, gif: settings.saver_gif ?? "" })}>Try it on the dock</button></div>
+              <p class="muted small">Any press on the dock stops it; that press doesn't run the key.</p>
+            {/if}
+          </div>
+        </section>
+
+        <section class="screen-card">
+          <h2>Intro</h2>
+          <div class="form">
+            <label>When Agora opens
+              <select value={settings.intro ?? "agora"} onchange={(e) => saveIntro({ intro: e.currentTarget.value })}>
+                <option value="agora">The Agora temple</option><option value="video">Your own video</option><option value="off">Nothing</option>
+              </select>
+            </label>
+            {#if settings.intro === "video"}
+              <label>Video
+                <span class="row grow"><input value={settings.intro_video ?? ""} placeholder="C:\Videos\intro.mp4" onchange={(e) => saveIntro({ intro_video: e.currentTarget.value })} />
+                  <button onclick={async () => { const p = await pickFile("Choose a video", "Videos", ["mp4", "webm", "m4v"]); if (p) saveIntro({ intro_video: p }); }}>File…</button></span>
+              </label>
+              <p class="muted small">MP4 or WebM, up to 300 MB. A click or any key skips it.</p>
+            {/if}
+            <div class="row"><button onclick={() => (introMode = settings.intro === "off" ? "agora" : (settings.intro ?? "agora"))}>Play it now</button></div>
+          </div>
+          <label class="switch-row">
+            <input type="checkbox" role="switch" checked={settings.dock_intro ?? true} onchange={(e) => saveIntro({ dock_intro: e.currentTarget.checked })} />
+            <span>
+              Build the temple on the dock when it connects
+              <span class="muted small">About two seconds, then your keys come back. <button class="link" onclick={() => call("preview_screen_saver", { mode: "intro", gif: "" })}>Try it</button></span>
+            </span>
+          </label>
+        </section>
+        </div>
+        <div class="dock-col">
         {#if status.ring_leds > 0}
         <section class="ring-card">
           <div class="side-head">
@@ -1791,57 +1844,6 @@
         {/if}
 
         <section class="screen-card">
-          <h2>Screen saver</h2>
-          <div class="form">
-            <label>On the dock
-              <select value={settings.saver ?? "off"} onchange={(e) => saveSaver({ saver: e.currentTarget.value })}>
-                {#each savers as sv}<option value={sv.id}>{sv.name}</option>{/each}
-              </select>
-            </label>
-            {#if (settings.saver ?? "off") !== "off"}
-              <label>Start after (minutes unused) <input type="number" min="1" max="240" value={settings.saver_minutes ?? 10} onchange={(e) => saveSaver({ saver_minutes: Number(e.currentTarget.value) })} /></label>
-            {/if}
-            {#if settings.saver === "gif"}
-              <label>GIF
-                <span class="row grow"><input value={settings.saver_gif ?? ""} placeholder="C:\Pictures\loop.gif" onchange={(e) => saveSaver({ saver_gif: e.currentTarget.value })} />
-                  <button onclick={async () => { const p = await pickFile("Choose a GIF", "GIF", ["gif"]); if (p) saveSaver({ saver_gif: p }); }}>File…</button></span>
-              </label>
-              <p class="muted small">It's stretched across all the keys, cropped to fit.</p>
-            {/if}
-            {#if (settings.saver ?? "off") !== "off"}
-              <div class="row"><button onclick={() => call("preview_screen_saver", { mode: settings.saver, gif: settings.saver_gif ?? "" })}>Try it on the dock</button></div>
-              <p class="muted small">Any press on the dock stops it; that press doesn't run the key.</p>
-            {/if}
-          </div>
-        </section>
-
-        <section class="screen-card">
-          <h2>Intro</h2>
-          <div class="form">
-            <label>When Agora opens
-              <select value={settings.intro ?? "agora"} onchange={(e) => saveIntro({ intro: e.currentTarget.value })}>
-                <option value="agora">The Agora temple</option><option value="video">Your own video</option><option value="off">Nothing</option>
-              </select>
-            </label>
-            {#if settings.intro === "video"}
-              <label>Video
-                <span class="row grow"><input value={settings.intro_video ?? ""} placeholder="C:\Videos\intro.mp4" onchange={(e) => saveIntro({ intro_video: e.currentTarget.value })} />
-                  <button onclick={async () => { const p = await pickFile("Choose a video", "Videos", ["mp4", "webm", "m4v"]); if (p) saveIntro({ intro_video: p }); }}>File…</button></span>
-              </label>
-              <p class="muted small">MP4 or WebM, up to 300 MB. A click or any key skips it.</p>
-            {/if}
-            <div class="row"><button onclick={() => (introMode = settings.intro === "off" ? "agora" : (settings.intro ?? "agora"))}>Play it now</button></div>
-            <label class="switch-row">
-              <input type="checkbox" role="switch" checked={settings.dock_intro ?? true} onchange={(e) => saveIntro({ dock_intro: e.currentTarget.checked })} />
-              <span>
-                Build the temple on the dock when it connects
-                <span class="muted small">About two seconds, then your keys come back. <button class="link" onclick={() => call("preview_screen_saver", { mode: "intro", gif: "" })}>Try it</button></span>
-              </span>
-            </label>
-          </div>
-        </section>
-
-        <section class="screen-card">
           <h2>Agora</h2>
           <div class="theme-row">
             <span>Look</span>
@@ -1864,6 +1866,7 @@
             </span>
           </label>
         </section>
+        </div>
       </div>
     {/if}
     {#if introMode}

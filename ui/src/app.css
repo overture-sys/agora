@@ -155,6 +155,7 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
 
 /* Dock */
 .dock-page { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.dock-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .slider { display: flex; flex-direction: column; gap: 10px; font-size: 13px; margin-top: 8px; }
 .slider b { font-weight: 600; color: var(--accent); }
 input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--accent) var(--fill, 80%), var(--line) var(--fill, 80%)); }

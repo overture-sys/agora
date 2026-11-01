@@ -522,6 +522,27 @@
     showUndo({ text: `Removed ${what}.`, undo: async () => { await hostUndo(); loadKey(k); } });
   }
 
+  // Right-click menu on a key that has an action.
+  let keyMenu = $state<{ x: number; y: number; k: number } | null>(null);
+
+  function openKeyMenu(e: MouseEvent, k: number) {
+    e.preventDefault();
+    keyMenu = { x: Math.min(e.clientX, window.innerWidth - 170), y: Math.min(e.clientY, window.innerHeight - 90), k };
+  }
+
+  async function menuEdit() {
+    const k = keyMenu!.k;
+    keyMenu = null;
+    await loadKey(k);
+  }
+
+  async function menuRemove() {
+    const k = keyMenu!.k;
+    keyMenu = null;
+    await loadKey(k);
+    await removeKey();
+  }
+
   // What's being dragged: an action from the list, or a key that has one.
   let dragged: Action | null = null;
   let draggedKey: number | null = null;
@@ -783,6 +804,10 @@
         undoToast();
         return;
       }
+      if (e.key === "Escape" && keyMenu) {
+        keyMenu = null;
+        return;
+      }
       if (e.key === "Escape" && page === "keys") {
         if (renaming) renaming = null;
         else loadKey(null);
@@ -841,6 +866,7 @@
     class:drop={dropTarget === k}
     onclick={() => (editable ? clickKey(k) : openKey(k))}
     ondblclick={() => editable && openFolder(k)}
+    oncontextmenu={(e) => (editable && previews[k] ? openKeyMenu(e, k) : e.preventDefault())}
     draggable={editable && previews[k] ? "true" : "false"}
     ondragstart={(e) => {
       draggedKey = k;
@@ -1399,7 +1425,7 @@
               <div class="key-list">
                 {#each Object.values(keyInfos) as ki (ki.key)}
                   <div class="key-row-wrap">
-                    <button class="key-row" onclick={() => loadKey(ki.key)}>
+                    <button class="key-row" onclick={() => loadKey(ki.key)} oncontextmenu={(e) => openKeyMenu(e, ki.key)}>
                       {#if previews[ki.key]}<img src={previews[ki.key]} alt="" />{:else}<span class="noicon"></span>{/if}
                       <span class="key-row-text"><b><span class="k">{slotName(ki.key)}</span> · {ki.name}</b><span class="muted small">{ki.plugin_name}</span></span>
                     </button>
@@ -1606,6 +1632,14 @@
             </span>
           </label>
         </section>
+      </div>
+    {/if}
+    {#if keyMenu}
+      <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+      <div class="menu-backdrop" onclick={() => (keyMenu = null)} oncontextmenu={(e) => { e.preventDefault(); keyMenu = null; }}></div>
+      <div class="key-menu" role="menu" style="left: {keyMenu.x}px; top: {keyMenu.y}px">
+        <button role="menuitem" onclick={menuEdit}>Edit key</button>
+        <button role="menuitem" class="danger" onclick={menuRemove}>Remove key</button>
       </div>
     {/if}
     <div class="statusbar" class:empty={!error && !toast && !notice}>

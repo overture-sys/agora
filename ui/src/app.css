@@ -355,3 +355,17 @@ button.on { border-color: var(--accent); color: var(--accent); }
 .status-line:empty { display: none; }
 .error-line { color: var(--bad); }
 .error-line span { flex: 1; }
+
+/* Right-click menu on a key */
+.menu-backdrop { position: fixed; inset: 0; z-index: 40; }
+.key-menu {
+  position: fixed; z-index: 41; min-width: 150px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); display: flex; flex-direction: column;
+}
+.key-menu button {
+  border: 0; background: none; text-align: left; padding: 7px 10px; border-radius: 5px; min-height: 0;
+  font-size: 14px; color: var(--text); cursor: pointer;
+}
+.key-menu button:hover, .key-menu button:focus-visible { background: var(--hover, rgba(127, 127, 127, 0.15)); }
+.key-menu button.danger { color: var(--danger, #b3402a); }

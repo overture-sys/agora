@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1 beta (2026-11-01)
+
+- Right-click a key to edit it or remove it (Remove key can be undone with Undo or Ctrl+Z).
+
 ## 0.7.0 beta (2026-11-01)
 
 Agora's own versions of the VSD Craft built-ins it was missing, written for Agora:

@@ -1,3 +1,12 @@
+/* Marcellus SC draws "1" like a capital I, so numbers in display text use
+   Inter's digits ("IO" read as 10 on keys and pages). */
+@font-face {
+  font-family: "Agora Digits";
+  src: url("../node_modules/@fontsource/inter/files/inter-latin-500-normal.woff2") format("woff2");
+  font-weight: 400 700;
+  unicode-range: U+0030-0039;
+}
+
 /* Agora's look: the Athenian agora. Marble, black-figure glaze, terracotta,
    bronze and Egyptian blue, with a meander band and ostraka for the log. */
 :root {
@@ -18,7 +27,7 @@
   --pi-bg: #2A231D;
   --shard: #E9C9A8;     /* ostrakon clay */
   --shard-text: #3A2A1E;
-  --display: "Marcellus SC", Georgia, serif;
+  --display: "Agora Digits", "Marcellus SC", Georgia, serif;
   --body: Inter, "Segoe UI", system-ui, sans-serif;
   --greek: "GFS Didot", "Noto Serif", Georgia, serif;
   --mono: ui-monospace, Consolas, monospace;
@@ -294,6 +303,7 @@ button.link { border: none; background: none; padding: 0; min-height: 0; font-si
 /* Forms for Agora's own actions and the title/icon editor */
 .form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
 .form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.form label.switch-row { flex-direction: row; align-items: flex-start; color: var(--text); }
 .form label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
 .form input:not([type]), .form input[type="text"], .form textarea, .form select { font: inherit; color: var(--text); }
 .form textarea { resize: vertical; }

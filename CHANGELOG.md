@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.5 beta (2026-11-01)
+
+- Security: Agora's local plugin server now only answers Agora's own pages and programs on this PC. A website open in your browser can't reach it, by its Origin or by a rebound domain name.
+- Security: Agora's own keys can't be changed over the plugin connection, and a running plugin can't be taken over by a second connection using its id.
+- Screen saver GIFs larger than 2048 x 2048 pixels are refused.
+- Dock page: cards stack in two columns without gaps, and switches sit beside their text.
+- Numbers in headings and on keys read as numbers ("10", not "IO").
+
 ## 0.7.4 beta (2026-11-01)
 
 - Hold for a second action: any key can run its own list of actions when held for half a second; a quick press still runs the key.

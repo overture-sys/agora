@@ -427,6 +427,11 @@ impl Gif {
         }
         let file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
         let decoder = image::codecs::gif::GifDecoder::new(file).ok()?;
+        // A small file can still claim a huge picture; refuse those.
+        let (gw, gh) = image::ImageDecoder::dimensions(&decoder);
+        if gw == 0 || gh == 0 || gw > 2048 || gh > 2048 {
+            return None;
+        }
         let mut frames = Vec::new();
         for f in decoder.into_frames().take(600) {
             let f = f.ok()?;

@@ -2976,7 +2976,15 @@ impl State {
             .unwrap_or("")
             .to_string();
         match event {
-            "registerPlugin" if self.plugins.contains_key(&uuid) => {
+            "registerPlugin"
+                if self.plugins.contains_key(&uuid)
+                    // A plugin that is connected already can't be taken over
+                    // by a second socket using its id.
+                    && !self
+                        .plugin_conn
+                        .get(&uuid)
+                        .is_some_and(|c| self.conns.contains_key(c)) =>
+            {
                 if let Some(c) = self.conns.get_mut(&id) {
                     c.role = Role::Plugin(uuid.clone());
                 }
@@ -2998,7 +3006,12 @@ impl State {
                 }
             }
             "registerPropertyInspector" => {
-                let Some(key) = self.key_of(&uuid) else {
+                // Agora's own keys have no settings panel on the socket, so
+                // nothing there can change what they run.
+                let Some(key) = self
+                    .key_of(&uuid)
+                    .filter(|k| self.layout.keys().get(k).is_some_and(|i| i.plugin != BUILTIN))
+                else {
                     return;
                 };
                 if let Some(c) = self.conns.get_mut(&id) {

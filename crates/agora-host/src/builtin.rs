@@ -167,6 +167,141 @@ pub static DEFS: &[Def] = &[
         navigation: false,
     },
     Def {
+        id: "quick-control",
+        name: "Quick control",
+        group: "System",
+        tooltip: "Sleep, lock, show the desktop, turn the screen off, mute the microphone or switch screens",
+        icon: r##"<circle cx="36" cy="38" r="18" S/><path d="M36 14 v20" S/>"##,
+        settings: || json!({ "what": "show-desktop" }),
+        navigation: false,
+    },
+    Def {
+        id: "quick-tool",
+        name: "Quick tool",
+        group: "System",
+        tooltip: "Opens a Windows tool: Calculator, emoji panel, Task Manager, search and more",
+        icon: r##"<path d="M44 14 a12 12 0 0 0 -11 17 l-19 19 l7 7 l19 -19 a12 12 0 0 0 17 -11 l-7 7 l-6 -1 l-1 -6 z" S/>"##,
+        settings: || json!({ "tool": "calculator" }),
+        navigation: false,
+    },
+    Def {
+        id: "close-window",
+        name: "Close window",
+        group: "System",
+        tooltip: "Closes the window in front",
+        icon: r##"<rect x="12" y="14" width="48" height="44" rx="4" S/><path d="M12 24 h48 M28 34 l16 16 M44 34 l-16 16" S/>"##,
+        settings: || json!({}),
+        navigation: false,
+    },
+    Def {
+        id: "mouse",
+        name: "Mouse",
+        group: "System",
+        tooltip: "Clicks, scrolls or moves the mouse",
+        icon: r##"<rect x="22" y="12" width="28" height="46" rx="14" S/><path d="M36 12 v14 M22 28 h28" S/>"##,
+        settings: || json!({ "mode": "click", "button": "left", "double": false, "amount": 3, "x": 0, "y": 0, "relative": true }),
+        navigation: false,
+    },
+    Def {
+        id: "browser",
+        name: "Browser",
+        group: "System",
+        tooltip: "Back, forward, refresh and tabs in your web browser",
+        icon: r##"<rect x="10" y="14" width="52" height="44" rx="4" S/><path d="M10 26 h52 M26 42 l-6 -6 l6 -6 M46 42 l6 -6 l-6 -6" S/>"##,
+        settings: || json!({ "what": "back" }),
+        navigation: false,
+    },
+    Def {
+        id: "password",
+        name: "Password",
+        group: "System",
+        tooltip: "Types a password kept in Windows Credential Manager, never in Agora's files",
+        icon: r##"<rect x="16" y="32" width="40" height="26" rx="4" S/><path d="M24 32 v-8 a12 12 0 0 1 24 0 v8 M36 42 v6" S/>"##,
+        settings: || json!({ "name": "", "enter": false }),
+        navigation: false,
+    },
+    Def {
+        id: "sound",
+        name: "Soundboard",
+        group: "System",
+        tooltip: "Plays a sound file, or stops all sounds",
+        icon: r##"<path d="M14 30 h10 l14 -12 v36 l-14 -12 h-10 z M46 28 a10 10 0 0 1 0 16 M52 22 a18 18 0 0 1 0 28" S/>"##,
+        settings: || json!({ "mode": "play", "path": "", "volume": 100 }),
+        navigation: false,
+    },
+    Def {
+        id: "udp",
+        name: "Network message",
+        group: "System",
+        tooltip: "Sends a UDP message to a device or program on your network",
+        icon: r##"<circle cx="18" cy="36" r="6" S/><circle cx="54" cy="22" r="6" S/><circle cx="54" cy="50" r="6" S/><path d="M24 33 l24 -9 M24 39 l24 9" S/>"##,
+        settings: || json!({ "host": "", "port": 0, "message": "", "hex": false }),
+        navigation: false,
+    },
+    Def {
+        id: "dock-sleep",
+        name: "Dock sleep",
+        group: "System",
+        tooltip: "Turns the dock's screen and light ring off; press any key to wake it",
+        icon: r##"<path d="M46 16 a22 22 0 1 0 10 30 a17 17 0 0 1 -10 -30 z" S/>"##,
+        settings: || json!({}),
+        navigation: false,
+    },
+    Def {
+        id: "cpu",
+        name: "CPU",
+        group: "Monitor",
+        tooltip: "Shows how busy the processor is",
+        icon: r##"<rect x="20" y="20" width="32" height="32" rx="3" S/><rect x="29" y="29" width="14" height="14" S/><path d="M28 14 v6 M36 14 v6 M44 14 v6 M28 52 v6 M36 52 v6 M44 52 v6 M14 28 h6 M14 36 h6 M14 44 h6 M52 28 h6 M52 36 h6 M52 44 h6" S/>"##,
+        settings: || json!({}),
+        navigation: false,
+    },
+    Def {
+        id: "memory",
+        name: "Memory",
+        group: "Monitor",
+        tooltip: "Shows how much memory (RAM) is in use",
+        icon: r##"<rect x="10" y="24" width="52" height="22" rx="2" S/><path d="M19 31 v8 M29 31 v8 M39 31 v8 M49 31 v8 M16 46 v6 M26 46 v6 M36 46 v6 M46 46 v6 M56 46 v6" S/>"##,
+        settings: || json!({}),
+        navigation: false,
+    },
+    Def {
+        id: "disk",
+        name: "Disk",
+        group: "Monitor",
+        tooltip: "Shows a drive's free space or how busy it is",
+        icon: r##"<rect x="12" y="22" width="48" height="28" rx="4" S/><circle cx="50" cy="36" r="3" S/><path d="M20 36 h18" S/>"##,
+        settings: || json!({ "drive": "C:", "show": "space" }),
+        navigation: false,
+    },
+    Def {
+        id: "gpu",
+        name: "GPU",
+        group: "Monitor",
+        tooltip: "Shows how busy the graphics card is",
+        icon: r##"<rect x="10" y="20" width="52" height="30" rx="3" S/><circle cx="28" cy="35" r="8" S/><path d="M44 29 h10 M44 35 h10 M44 41 h10 M18 50 v6 M54 50 v6" S/>"##,
+        settings: || json!({}),
+        navigation: false,
+    },
+    Def {
+        id: "gpu-memory",
+        name: "GPU memory",
+        group: "Monitor",
+        tooltip: "Shows how much of the graphics card's memory is in use",
+        icon: r##"<rect x="10" y="20" width="52" height="30" rx="3" S/><path d="M18 28 h8 v14 h-8 z M32 28 h8 v14 h-8 z M46 28 h8 v14 h-8 z M18 50 v6 M54 50 v6" S/>"##,
+        settings: || json!({}),
+        navigation: false,
+    },
+    Def {
+        id: "ip",
+        name: "IP address",
+        group: "Monitor",
+        tooltip: "Shows your public or local IP address; press to look it up again",
+        icon: r##"<circle cx="36" cy="36" r="20" S/><path d="M16 36 h40 M36 16 c-10 10 -10 30 0 40 c10 -10 10 -30 0 -40" S/><path d="M26 28 h20" S/>"##,
+        settings: || json!({ "which": "public" }),
+        navigation: false,
+    },
+    Def {
         id: MULTI,
         name: "Multi-action",
         group: "Multi-action",
@@ -198,7 +333,55 @@ pub static DEFS: &[Def] = &[
 /// Steps a multi-action (or knob) may hold: Agora's own actions except
 /// folders, multi-actions and knobs, plus pauses.
 pub fn step_allowed(id: &str) -> bool {
-    id == DELAY || (def(id).is_some() && !matches!(id, FOLDER | MULTI | TOGGLE | DIAL))
+    id == DELAY
+        || (def(id).is_some() && !matches!(id, FOLDER | MULTI | TOGGLE | DIAL) && !is_monitor(id))
+}
+
+/// Keys that show a live reading.
+pub fn is_monitor(id: &str) -> bool {
+    def(id).is_some_and(|d| d.group == "Monitor")
+}
+
+/// A monitor key's face: its name at the top, the value large in the
+/// middle and, when there is one, a bar for the share in use.
+pub fn monitor_image(label: &str, value: &str, share: Option<f32>) -> String {
+    let esc = |t: &str| {
+        t.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let size = match value.chars().count() {
+        0..=5 => 20,
+        6..=8 => 15,
+        9..=11 => 11,
+        12..=15 => 9,
+        _ => 8,
+    };
+    let label_size = if label.chars().count() > 9 { 8 } else { 10 };
+    let bar = share.map_or(String::new(), |f| {
+        let f = f.clamp(0.0, 1.0);
+        let color = if f >= 0.9 {
+            "#d9534a"
+        } else if f >= 0.7 {
+            "#e8bc62"
+        } else {
+            "#d9794a"
+        };
+        format!(
+            r##"<rect x="10" y="54" width="52" height="6" rx="3" fill="#4a3f36"/><rect x="10" y="54" width="{:.1}" height="6" rx="3" fill="{color}"/>"##,
+            52.0 * f
+        )
+    });
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72"><rect width="72" height="72" fill="#1d1915"/><text x="36" y="18" font-family="sans-serif" font-size="{label_size}" font-weight="600" letter-spacing="0.5" text-anchor="middle" fill="#c9b79c">{}</text><text x="36" y="{}" font-family="sans-serif" font-size="{size}" font-weight="700" text-anchor="middle" fill="#f3ecdf">{}</text>{bar}</svg>"##,
+        esc(label),
+        if share.is_some() { 44 } else { 46 },
+        esc(value)
+    );
+    format!(
+        "data:image/svg+xml;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(svg)
+    )
 }
 
 pub fn def(id: &str) -> Option<&'static Def> {
@@ -250,6 +433,7 @@ pub fn group_icon(group: &str) -> Option<String> {
         "Navigation" => FOLDER,
         "Multi-action" => MULTI,
         "Knob" => DIAL,
+        "Monitor" => "cpu",
         _ => "open",
     })
 }

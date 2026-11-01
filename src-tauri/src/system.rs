@@ -226,6 +226,16 @@ mod input {
     }
 }
 
+/// Presses a key combination.
+pub fn press(keys: &[K]) -> Result<(), String> {
+    input::hotkey(keys)
+}
+
+/// Types text, then Enter if asked.
+pub fn type_text(text: &str, enter: bool) -> Result<(), String> {
+    input::text(text, enter)
+}
+
 /// Runs open, website, hotkey, text or media. Brightness and the ring are
 /// dock settings, done by the caller.
 pub fn run(action: &str, settings: &Value, open_url: impl Fn(&str)) -> Result<(), String> {

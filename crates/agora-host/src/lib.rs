@@ -15,6 +15,7 @@ mod host;
 mod launch;
 pub mod manifest;
 mod server;
+pub mod stats;
 pub mod vsd_import;
 
 pub use face::{Face, Overlay};

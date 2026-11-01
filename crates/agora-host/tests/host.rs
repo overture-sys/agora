@@ -696,3 +696,44 @@ fn information_actions_go_on_keys_and_plugins_switch_profiles() {
     let second = view.profiles.iter().find(|p| p.name == "Second").unwrap();
     assert_eq!(view.profile, second.id);
 }
+
+#[test]
+fn monitor_keys_fill_in_live_readings() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.device_connected(true);
+    host.place(3, builtin::PLUGIN, "memory").unwrap();
+    let first = match wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 3, .. })) {
+        HostEvent::Face { face, .. } => face.image,
+        _ => unreachable!(),
+    };
+    // The sampler reads every 2 seconds; the face then changes from "–".
+    wait_for(&rx, 8, |e| {
+        matches!(e, HostEvent::Face { key: 3, face } if face.image.is_some() && face.image != first)
+    });
+}
+
+#[test]
+fn page_indicator_and_next_profile() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.device_connected(true);
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    let first_page = host.layout().unwrap().pages[0].id.clone();
+    host.layout_op(LayoutOp::GoToPage(first_page)).unwrap();
+    host.place(4, builtin::PLUGIN, builtin::PAGE_INDICATOR).unwrap();
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "1 / 2"));
+
+    host.layout_op(LayoutOp::AddProfile("Second".into())).unwrap();
+    let ids: Vec<String> = host.layout().unwrap().profiles.iter().map(|p| p.id.clone()).collect();
+    host.layout_op(LayoutOp::SwitchProfile(ids[0].clone())).unwrap();
+    host.place(0, builtin::PLUGIN, builtin::SWITCH_PROFILE).unwrap();
+    host.set_settings(0, serde_json::json!({ "profile": "next" }));
+    host.key(0, true);
+    host.key(0, false);
+    let end = Instant::now() + Duration::from_secs(5);
+    while host.layout().unwrap().profile != ids[1] {
+        assert!(Instant::now() < end, "didn't move to the next profile");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

@@ -14,6 +14,7 @@ use crate::builtin::{self, PLUGIN as BUILTIN};
 use crate::face::{self, Face, Overlay};
 use crate::launch::{self, Running};
 use crate::manifest::{self, Kind, Plugin};
+use crate::stats;
 use crate::vsd_import;
 use crate::{server, Config};
 
@@ -565,6 +566,8 @@ pub(crate) enum Msg {
     /// Puts back what the last removal took away.
     Undo(oneshot::Sender<bool>),
     Shutdown(oneshot::Sender<()>),
+    /// New readings for the monitor keys.
+    Stats(Box<stats::Snapshot>),
 }
 
 /// The app's handle on a running host. Methods block briefly; call them from
@@ -602,6 +605,8 @@ impl HostHandle {
         let port = runtime.block_on(server::bind(Arc::new(plugin_dirs), tx.clone()))?;
         let mut layout = load_layout(&config.data_dir);
         layout.fix();
+        let stats_tx = tx.clone();
+        let stats_ctl = stats::start(move |s| stats_tx.send(Msg::Stats(Box::new(s))).is_ok());
         let state = State {
             config,
             port,
@@ -622,6 +627,8 @@ impl HostHandle {
             down: HashMap::new(),
             auto_from: None,
             undo: None,
+            stats: stats::Snapshot::default(),
+            stats_ctl,
         };
         runtime.spawn(state.run(rx));
         tx.send(Msg::AllFaces(true)).ok();
@@ -799,6 +806,25 @@ struct State {
     /// The layout as it was before the last removal (a key, page, profile
     /// or plugin), until something else changes.
     undo: Option<Layout>,
+    /// The latest readings for monitor keys, and the sampler's controls.
+    stats: stats::Snapshot,
+    stats_ctl: stats::Control,
+}
+
+/// The drive a Disk key shows, as "C:".
+fn disk_drive(settings: &Value) -> String {
+    let d = settings
+        .get("drive")
+        .and_then(Value::as_str)
+        .unwrap_or("C:")
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_uppercase();
+    match d.len() {
+        1 => format!("{d}:"),
+        _ if d.is_empty() => "C:".into(),
+        _ => d,
+    }
 }
 
 fn layout_path(dir: &std::path::Path) -> PathBuf {
@@ -898,6 +924,102 @@ impl State {
     }
 
     fn handle(&mut self, msg: Msg) {
+        self.handle_msg(msg);
+        self.want_stats();
+    }
+
+    /// Tells the sampler whether monitor keys are showing, and which drives.
+    fn want_stats(&mut self) {
+        let mut any = false;
+        let mut drives = Vec::new();
+        for i in self.layout.keys().values() {
+            if i.plugin == BUILTIN && builtin::is_monitor(&i.action) {
+                any = true;
+                if i.action == "disk" {
+                    drives.push(disk_drive(&i.settings));
+                }
+            }
+        }
+        drives.sort();
+        drives.dedup();
+        use std::sync::atomic::Ordering;
+        self.stats_ctl.wanted.store(any, Ordering::Relaxed);
+        if let Ok(mut d) = self.stats_ctl.drives.lock() {
+            *d = drives;
+        }
+    }
+
+    fn monitor_face(&self, inst: &Instance) -> Face {
+        let s = &self.stats;
+        let pct = |v: f32| format!("{:.0}%", v.clamp(0.0, 100.0));
+        let share = |used: u64, total: u64| used as f32 / total.max(1) as f32;
+        let dash = "\u{2013}".to_string();
+        let (label, value, bar) = match inst.action.as_str() {
+            "cpu" => (
+                "CPU".to_string(),
+                s.cpu.map_or(dash, pct),
+                s.cpu.map(|v| v / 100.0),
+            ),
+            "memory" => match s.memory {
+                Some((u, t)) => ("MEMORY".into(), pct(100.0 * share(u, t)), Some(share(u, t))),
+                None => ("MEMORY".into(), dash, None),
+            },
+            "disk" => {
+                let d = disk_drive(&inst.settings);
+                if inst.settings.get("show").and_then(Value::as_str) == Some("busy") {
+                    let v = s.disk_busy.get(&d).copied();
+                    (
+                        format!("{d} BUSY"),
+                        v.map_or(dash, pct),
+                        v.map(|v| v / 100.0),
+                    )
+                } else {
+                    match s.disk_space.get(&d) {
+                        Some(&(u, t)) => (
+                            format!("DISK {d}"),
+                            pct(100.0 * share(u, t)),
+                            Some(share(u, t)),
+                        ),
+                        None => (format!("DISK {d}"), dash, None),
+                    }
+                }
+            }
+            "gpu" => (
+                "GPU".into(),
+                s.gpu.map_or(dash, pct),
+                s.gpu.map(|v| v / 100.0),
+            ),
+            "gpu-memory" => match s.gpu_memory {
+                Some((u, Some(t))) => (
+                    "GPU MEMORY".into(),
+                    pct(100.0 * share(u, t)),
+                    Some(share(u, t)),
+                ),
+                Some((u, None)) => ("GPU MEMORY".into(), stats::bytes(u), None),
+                None => ("GPU MEMORY".into(), dash, None),
+            },
+            _ => {
+                let local = inst.settings.get("which").and_then(Value::as_str) == Some("local");
+                let ip = if local { &s.local_ip } else { &s.public_ip };
+                (
+                    if local { "LOCAL IP" } else { "PUBLIC IP" }.into(),
+                    ip.clone().unwrap_or(dash),
+                    None,
+                )
+            }
+        };
+        Face {
+            image: Some(builtin::monitor_image(&label, &value, bar)),
+            title: String::new(),
+            show_title: true,
+            align: "bottom".into(),
+            font_size: 11.0,
+            color: "#ffffff".into(),
+            overlay: Overlay::None,
+        }
+    }
+
+    fn handle_msg(&mut self, msg: Msg) {
         // A removal can be undone until something else changes the layout.
         match &msg {
             Msg::Clear(_)
@@ -916,6 +1038,21 @@ impl State {
             _ => {}
         }
         match msg {
+            Msg::Stats(snapshot) => {
+                if *snapshot != self.stats {
+                    self.stats = *snapshot;
+                    let keys: Vec<usize> = self
+                        .layout
+                        .keys()
+                        .iter()
+                        .filter(|(_, i)| i.plugin == BUILTIN && builtin::is_monitor(&i.action))
+                        .map(|(k, _)| *k)
+                        .collect();
+                    for k in keys {
+                        self.redraw(k);
+                    }
+                }
+            }
             Msg::Undo(done) => {
                 let Some(before) = self.undo.take() else {
                     let _ = done.send(false);
@@ -1236,7 +1373,9 @@ impl State {
         let Some(inst) = self.layout.keys().get(&key).cloned() else {
             return Face::default();
         };
-        let mut face = if inst.plugin == BUILTIN {
+        let mut face = if inst.plugin == BUILTIN && builtin::is_monitor(&inst.action) {
+            self.monitor_face(&inst)
+        } else if inst.plugin == BUILTIN {
             Face {
                 image: builtin::icon_for(&inst.action, inst.state),
                 title: builtin::default_title(&inst.action, &inst.settings),
@@ -1791,6 +1930,15 @@ impl State {
                 self.flip_toggle(&inst.context);
             }
             self.run_steps(steps);
+            return;
+        }
+        if builtin::is_monitor(&inst.action) {
+            // A press looks the address up again; the others just show.
+            if inst.action == "ip" {
+                self.stats_ctl
+                    .refresh_ip
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             return;
         }
         if !def.navigation {

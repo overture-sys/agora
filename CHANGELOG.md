@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 beta (2026-11-01)
+
+Agora's own versions of the VSD Craft built-ins it was missing, written for Agora:
+
+- Monitor keys: CPU, memory, disk (how full or how busy), GPU and GPU memory, updated every 2 seconds, with a bar. IP address shows your public address (looked up through OpenDNS, press to refresh) or your local one.
+- Quick control: sleep, lock, show desktop, turn the screens off, mute the microphone, switch screens.
+- Quick tool: Calculator, emoji panel, Task Manager, search, notifications, Settings, Control Panel, File Explorer, screenshot, clipboard history, Run and new email.
+- Close window, Mouse (click, scroll, move), Browser (back, forward, refresh, stop, home and tabs).
+- Password: types a password saved in Windows Credential Manager; it never goes in Agora's files.
+- Soundboard: play an MP3, WAV or other sound at a set volume, or stop all sounds.
+- Network message: send a UDP message, as text or hex bytes.
+- Dock sleep: turns the dock's screen and ring off until the next press.
+
 ## 0.6.2 beta (2026-11-01)
 
 - VSD Craft import brings over more keys: Open Apps (opened through the Start menu, with the app's picture), Page Indicator, and round buttons set to the previous or next scene.

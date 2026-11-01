@@ -2,6 +2,7 @@
 // host. Keys show what their plugins draw; presses go to the plugins.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod extra;
 mod foreground;
 mod system;
 
@@ -578,6 +579,18 @@ fn run_dock_action(
     let mut dock = shared.lock().unwrap();
     let cur = dock.settings.clone();
     let mode = settings.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    if action == "dock-sleep" {
+        // Dark until the next press; the saved settings stay as they are.
+        DOCK_ASLEEP.store(true, std::sync::atomic::Ordering::Relaxed);
+        return match &dock.worker {
+            Some(w) => {
+                w.send(Command::Brightness(0));
+                w.send(Command::RingOff);
+                Ok(())
+            }
+            None => Err("No dock connected".into()),
+        };
+    }
     let result = if action == "brightness" {
         let value = settings
             .get("value")
@@ -783,6 +796,24 @@ fn plugin_dir(host: &State<Host>, uuid: &str) -> Result<(PathBuf, String), Strin
 
 /// Opens one of Agora's own pages in the browser: the issue tracker or Ko-fi.
 #[tauri::command]
+fn save_password(name: String, secret: String) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("Give the password a name first".into());
+    }
+    extra::win::save_secret(&extra::credential_name(&name), &secret)
+}
+
+#[tauri::command]
+fn password_saved(name: String) -> bool {
+    !name.trim().is_empty() && extra::win::has_secret(&extra::credential_name(&name))
+}
+
+#[tauri::command]
+fn forget_password(name: String) -> Result<(), String> {
+    extra::win::delete_secret(&extra::credential_name(&name))
+}
+
+#[tauri::command]
 fn open_link(which: String) -> Result<(), String> {
     let url = match which.as_str() {
         "issues" => "https://gitlab.com/overture-group1/agora/-/issues",
@@ -937,8 +968,11 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
             }
             HostEvent::Run { action, settings } => {
                 let result = match action.as_str() {
-                    "brightness" | "ring" => run_dock_action(&app, &shared, &action, &settings),
-                    _ => system::run(&action, &settings, open_url),
+                    "brightness" | "ring" | "dock-sleep" => {
+                        run_dock_action(&app, &shared, &action, &settings)
+                    }
+                    _ => extra::run(&action, &settings)
+                        .unwrap_or_else(|| system::run(&action, &settings, open_url)),
                 };
                 if let Err(message) = result {
                     let _ = app.emit(
@@ -1030,11 +1064,40 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
     }
 }
 
+/// Set by Dock sleep; the next press wakes the dock instead of running a key.
+static DOCK_ASLEEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Puts the dock's brightness and ring back as they were saved.
+fn wake_dock(app: &AppHandle) {
+    let shared = app.state::<Shared>();
+    let dock = shared.lock().unwrap();
+    if let Some(w) = &dock.worker {
+        let s = &dock.settings;
+        w.send(Command::Brightness(s.brightness));
+        if s.ring_on {
+            w.send(Command::Ring(ring_lights(s)));
+            w.send(Command::RingBrightness(s.ring_brightness));
+        }
+    }
+}
+
 /// Sends dock input to the plugins and the window until the worker stops.
 fn forward_events(app: &AppHandle, host: &Host, events: Receiver<Event>) {
+    let mut swallow_release = false;
     for ev in events {
         match ev {
             Event::Input(i) => {
+                if i.action == Action::Press
+                    && DOCK_ASLEEP.swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    wake_dock(app);
+                    swallow_release = true;
+                    continue;
+                }
+                if swallow_release && i.action == Action::Release {
+                    swallow_release = false;
+                    continue;
+                }
                 let pressed = i.action == Action::Press;
                 let turn = match i.action {
                     Action::Turn(t) | Action::Swipe(t) => t,
@@ -1133,6 +1196,9 @@ fn main() {
             recent_apps,
             list_vsd_profiles,
             import_vsd_profiles,
+            save_password,
+            password_saved,
+            forget_password,
             set_key_settings,
             set_key_look
         ])

@@ -21,7 +21,8 @@ Your keys, profiles and settings live in `%APPDATA%\Agora` and are kept when you
 - **Docks:** Stream Dock M18 (tested). Also M18 V3, 293V3, 293S (three versions), N3, N4 / N4 Pro and XL (untested).
 - **Keys:** drag an action onto a key, button or knob. Your own title, title position, colour and icon on any key.
 - **Profiles, pages and folders.** A profile can follow an app: it comes up while that app is in front.
-- **Agora's own actions:** open an app, file or folder; website; hotkey (press the keys to record them); type text; media keys; dock brightness; light ring; next, previous or go to page; switch profile; folder.
+- **Agora's own actions:** open an app, file or folder; website; hotkey (press the keys to record them); type text; media keys; quick controls (sleep, lock, show desktop, screen off, microphone mute, switch screens); quick tools (Calculator, emoji panel, Task Manager, search and more); close window; mouse click, scroll and move; browser back, forward, refresh and tabs; saved passwords (kept in Windows Credential Manager); soundboard; UDP network messages; dock brightness, dock sleep and the light ring; next, previous or go to page, page indicator; switch profile (or the next or previous one); folder.
+- **Monitor keys:** live CPU, memory, disk, GPU and GPU memory readings, and your public or local IP address.
 - **Multi-actions:** run several actions in order with pauses, a Toggle that alternates between two lists, and a Knob action for turning left, turning right and pressing.
 - **Plugins:** runs Stream Dock plugins unchanged (Node.js, HTML and .exe plugins), with their own settings panels. Knob actions get dial turns, presses and strip taps. Tested with Winged Keys and Shannon Keys.
 - **Undo:** removing a key, page, profile or plugin can be undone for a few seconds (Undo, or Ctrl+Z).
@@ -35,7 +36,7 @@ Node.js plugins need Node.js 20 or newer. Agora uses, in order: the `AGORA_NODE`
 Agora starts a plugin only once one of its actions is on a key, so plugins you have installed but don't use cost nothing.
 
 ## Not done yet
-- Page indicator, "open several apps", hotkey switch and VSD Craft's Quick Control tools.
+- "Open several apps", a dedicated hotkey switch and a carousel multi-action.
 - Importing VSD Craft profiles made for docks other than the M18.
 - If Agora crashes, plugins it started may keep running until you sign out.
 

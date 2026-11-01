@@ -352,6 +352,18 @@
     if (typeof path === "string") save({ path });
   }
 
+  async function pickSound(save: Save) {
+    const path = await openDialog({ multiple: false, directory: false, title: "Choose a sound", filters: [{ name: "Sounds", extensions: ["mp3", "wav", "wma", "m4a", "aac"] }] }).catch(() => null);
+    if (typeof path === "string") save({ path });
+  }
+
+  // The password box is never saved in the layout; it goes straight to Windows.
+  let pwDraft = $state("");
+  let pwTick = $state(0);
+  function pwSaved(name: string, _tick: number) {
+    return invoke<boolean>("password_saved", { name }).catch(() => false);
+  }
+
   async function pickFolderPath(save: Save) {
     const path = await openDialog({ multiple: false, directory: true, title: "Choose a folder" }).catch(() => null);
     if (typeof path === "string") save({ path });
@@ -370,10 +382,19 @@
     ring: { mode: "toggle", color: "#d9794a" },
     "go-to-page": { page: 1 },
     "switch-profile": { profile: "" },
+    "quick-control": { what: "show-desktop" },
+    "quick-tool": { tool: "calculator" },
+    "close-window": {},
+    mouse: { mode: "click", button: "left", double: false, amount: 3, x: 0, y: 0, relative: true },
+    browser: { what: "back" },
+    password: { name: "", enter: false },
+    sound: { mode: "play", path: "", volume: 100 },
+    udp: { host: "", port: 0, message: "", hex: false },
+    "dock-sleep": {},
     delay: { ms: 500 },
   };
   const stepChoices = $derived([
-    ...actions.filter((a) => a.plugin === "com.agora.builtin" && !["folder", "multi", "toggle", "dial"].includes(a.action)).map((a) => ({ id: a.action, name: a.name })),
+    ...actions.filter((a) => a.plugin === "com.agora.builtin" && !["folder", "multi", "toggle", "dial", "page-indicator", "cpu", "memory", "disk", "gpu", "gpu-memory", "ip"].includes(a.action)).map((a) => ({ id: a.action, name: a.name })),
     { id: "delay", name: "Pause" },
   ]);
 
@@ -1099,6 +1120,103 @@
       {#if st.mode === "color"}
         <label class="check">Colour <input type="color" value={st.color ?? "#d9794a"} onchange={(e) => save({ color: e.currentTarget.value })} /></label>
       {/if}
+    {:else if action === "quick-control"}
+      <label>Each press
+        <select value={st.what ?? "show-desktop"} onchange={(e) => save({ what: e.currentTarget.value })}>
+          <option value="show-desktop">Show the desktop</option><option value="lock">Lock the computer</option><option value="sleep">Put the computer to sleep</option>
+          <option value="screen-off">Turn the screens off</option><option value="mic-mute">Mute or unmute the microphone</option><option value="switch-screen">Switch screens (projector menu)</option>
+        </select>
+      </label>
+    {:else if action === "quick-tool"}
+      <label>Opens
+        <select value={st.tool ?? "calculator"} onchange={(e) => save({ tool: e.currentTarget.value })}>
+          <option value="calculator">Calculator</option><option value="emoji">Emoji panel</option><option value="task-manager">Task Manager</option>
+          <option value="search">Windows search</option><option value="notifications">Notifications</option><option value="settings">Windows Settings</option>
+          <option value="control-panel">Control Panel</option><option value="file-explorer">File Explorer</option><option value="snip">Screenshot (snip)</option>
+          <option value="clipboard">Clipboard history</option><option value="run">Run box</option><option value="mail">New email</option>
+        </select>
+      </label>
+    {:else if action === "close-window"}
+      <p class="muted small">Closes whichever window is in front, like clicking its ×. Apps with unsaved work still ask first.</p>
+    {:else if action === "dock-sleep"}
+      <p class="muted small">Turns the dock's screen and light ring off. Press any key to wake it; that press doesn't run the key.</p>
+    {:else if action === "mouse"}
+      <label>Each press
+        <select value={st.mode ?? "click"} onchange={(e) => save({ mode: e.currentTarget.value })}>
+          <option value="click">Click</option><option value="scroll-up">Scroll up</option><option value="scroll-down">Scroll down</option>
+          <option value="scroll-left">Scroll left</option><option value="scroll-right">Scroll right</option><option value="move">Move the pointer</option>
+        </select>
+      </label>
+      {#if (st.mode ?? "click") === "click"}
+        <label>Button
+          <select value={st.button ?? "left"} onchange={(e) => save({ button: e.currentTarget.value })}>
+            <option value="left">Left</option><option value="right">Right</option><option value="middle">Middle</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" checked={!!st.double} onchange={(e) => save({ double: e.currentTarget.checked })} /> Double-click</label>
+      {:else if st.mode === "move"}
+        <span class="row"><label>Across <input type="number" value={st.x ?? 0} onchange={(e) => save({ x: Number(e.currentTarget.value) })} /></label>
+          <label>Down <input type="number" value={st.y ?? 0} onchange={(e) => save({ y: Number(e.currentTarget.value) })} /></label></span>
+        <label class="check"><input type="checkbox" checked={st.relative ?? true} onchange={(e) => save({ relative: e.currentTarget.checked })} /> From where the pointer is now (otherwise from the top-left of the screen)</label>
+      {:else}
+        <label>Notches <input type="number" min="1" max="50" value={st.amount ?? 3} onchange={(e) => save({ amount: Number(e.currentTarget.value) })} /></label>
+      {/if}
+    {:else if action === "browser"}
+      <label>Each press
+        <select value={st.what ?? "back"} onchange={(e) => save({ what: e.currentTarget.value })}>
+          <option value="back">Back</option><option value="forward">Forward</option><option value="refresh">Refresh</option><option value="stop">Stop loading</option>
+          <option value="home">Home page</option><option value="new-tab">New tab</option><option value="close-tab">Close tab</option>
+          <option value="reopen-tab">Reopen closed tab</option><option value="next-tab">Next tab</option><option value="previous-tab">Previous tab</option>
+        </select>
+      </label>
+    {:else if action === "password"}
+      <label>Name <input value={st.name ?? ""} placeholder="Work email" onchange={(e) => save({ name: e.currentTarget.value })} /></label>
+      {#if (st.name ?? "").trim()}
+        {#await pwSaved(st.name, pwTick) then saved}
+          <p class="muted small">{saved ? "A password is saved under this name." : "No password saved under this name yet."}</p>
+        {/await}
+        <span class="row grow"><input type="password" autocomplete="off" placeholder="Type the password" bind:value={pwDraft} />
+          <button onclick={async () => { await call("save_password", { name: st.name, secret: pwDraft }); pwDraft = ""; pwTick++; }} disabled={!pwDraft}>Save</button>
+          <button onclick={async () => { await call("forget_password", { name: st.name }); pwTick++; }}>Forget</button></span>
+        <p class="muted small">Kept in Windows Credential Manager under "Agora/{st.name}", never in Agora's own files.</p>
+      {/if}
+      <label class="check"><input type="checkbox" checked={!!st.enter} onchange={(e) => save({ enter: e.currentTarget.checked })} /> Press Enter after</label>
+    {:else if action === "sound"}
+      <label>Each press
+        <select value={st.mode ?? "play"} onchange={(e) => save({ mode: e.currentTarget.value })}>
+          <option value="play">Play a sound</option><option value="stop">Stop all sounds</option>
+        </select>
+      </label>
+      {#if (st.mode ?? "play") === "play"}
+        <label>Sound file
+          <span class="row grow"><input value={st.path ?? ""} placeholder="C:\Sounds\horn.mp3" onchange={(e) => save({ path: e.currentTarget.value })} />
+            <button onclick={() => pickSound(save)}>File…</button></span>
+        </label>
+        <label class="slider"><span>Volume <b>{st.volume ?? 100}%</b></span>
+          <input type="range" min="0" max="100" value={st.volume ?? 100} style="--fill: {st.volume ?? 100}%" onchange={(e) => save({ volume: Number(e.currentTarget.value) })} />
+        </label>
+      {/if}
+    {:else if action === "udp"}
+      <span class="row"><label>Address <input value={st.host ?? ""} placeholder="192.168.1.50" onchange={(e) => save({ host: e.currentTarget.value })} /></label>
+        <label>Port <input type="number" min="1" max="65535" value={st.port || ""} onchange={(e) => save({ port: Number(e.currentTarget.value) })} /></label></span>
+      <label>Message <input value={st.message ?? ""} onchange={(e) => save({ message: e.currentTarget.value })} /></label>
+      <label class="check"><input type="checkbox" checked={!!st.hex} onchange={(e) => save({ hex: e.currentTarget.checked })} /> The message is hex bytes (like 01 ff 7a)</label>
+    {:else if action === "disk"}
+      <label>Drive <input value={st.drive ?? "C:"} maxlength="3" onchange={(e) => save({ drive: e.currentTarget.value })} /></label>
+      <label>Shows
+        <select value={st.show ?? "space"} onchange={(e) => save({ show: e.currentTarget.value })}>
+          <option value="space">How full it is</option><option value="busy">How busy it is</option>
+        </select>
+      </label>
+    {:else if action === "ip"}
+      <label>Shows
+        <select value={st.which ?? "public"} onchange={(e) => save({ which: e.currentTarget.value })}>
+          <option value="public">Public address (what websites see)</option><option value="local">Local address (on your network)</option>
+        </select>
+      </label>
+      <p class="muted small">The public address is looked up every 15 minutes through OpenDNS; press the key to look again.</p>
+    {:else if ["cpu", "memory", "gpu", "gpu-memory"].includes(action)}
+      <p class="muted small">Updates every 2 seconds while the key is on the dock.</p>
     {:else if action === "delay"}
       <label>Pause for (milliseconds) <input type="number" min="0" max="60000" step="100" value={st.ms ?? 500} onchange={(e) => save({ ms: Number(e.currentTarget.value) })} /></label>
     {:else if action === "multi"}

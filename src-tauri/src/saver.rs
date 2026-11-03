@@ -87,7 +87,12 @@ pub fn stop(app: &AppHandle) -> bool {
     if !ACTIVE.load(Ordering::SeqCst) {
         return false;
     }
-    GEN.fetch_add(1, Ordering::SeqCst);
+    {
+        // Wait out a frame being sent, so none lands after the redraw.
+        let shared = app.state::<Shared>();
+        let _dock = shared.lock().unwrap();
+        GEN.fetch_add(1, Ordering::SeqCst);
+    }
     finish(app);
     true
 }
@@ -132,10 +137,13 @@ fn play(shared: &Shared, model: &'static Model, gen: u64, show: Show) {
             }
             let img = image::DynamicImage::ImageRgba8(tile);
             if let Ok(jpeg) = keyimage::to_jpeg(&img, screen.width, screen.height, model.orientation) {
+                // Checked under the lock `stop` takes, so no frame can land
+                // after the keys have been given back.
+                let dock = shared.lock().unwrap();
                 if GEN.load(Ordering::SeqCst) != gen {
                     return;
                 }
-                match shared.lock().unwrap().worker.as_ref() {
+                match dock.worker.as_ref() {
                     Some(wk) => {
                         wk.send(Command::SetKeyJpeg(i, jpeg));
                     }

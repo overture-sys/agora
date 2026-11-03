@@ -1433,10 +1433,16 @@ impl State {
             }
             Msg::Steps(steps) => self.run_steps(steps),
             Msg::AllFaces(force) => {
+                // Empty keys too: a screen saver or intro may have drawn on
+                // them, and keys that were emptied need blanking.
+                let mut keys: std::collections::BTreeSet<usize> =
+                    self.layout.keys().keys().copied().collect();
+                keys.extend(self.shown.keys().copied());
                 if force {
                     self.shown.clear();
+                    let d = &self.config.device;
+                    keys.extend(0..d.rows * d.columns);
                 }
-                let keys: Vec<usize> = self.layout.keys().keys().copied().collect();
                 for k in keys {
                     self.redraw(k);
                 }

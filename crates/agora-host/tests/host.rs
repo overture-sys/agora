@@ -847,3 +847,24 @@ fn copy_paste_duplicate_and_move_to_page() {
     host.layout_op(LayoutOp::GoToPage(second)).unwrap();
     assert_eq!(host.key_info(0).unwrap().settings["url"], "https://b.example");
 }
+
+#[test]
+fn redrawing_everything_repaints_empty_keys_too() {
+    // After a screen saver, every key screen must be drawn again, including
+    // the empty ones, or the saver's last frame stays on them.
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    std::thread::sleep(Duration::from_millis(300));
+    while rx.try_recv().is_ok() {}
+    host.redraw_all();
+    let mut seen = std::collections::BTreeSet::new();
+    let end = Instant::now() + Duration::from_secs(5);
+    while seen.len() < 15 && Instant::now() < end {
+        if let Ok(HostEvent::Face { key, .. }) = rx.recv_timeout(Duration::from_millis(100)) {
+            if key < 15 {
+                seen.insert(key);
+            }
+        }
+    }
+    assert_eq!(seen.len(), 15, "keys redrawn: {seen:?}");
+}

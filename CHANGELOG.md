@@ -6,6 +6,7 @@ Security review of 0.7.6.
 
 - Security: the local plugin server now only answers pages it served itself (its own address and port). Pages from other local servers on this PC, such as a dev server, are turned away.
 - Security: the intro video and screen-saver GIF must be a file on this PC. Network paths (\\server\share) are refused, so picking one can't send your Windows sign-in to another computer, and the intro video must really be an MP4 or WebM file.
+- Fixed: after a screen saver, empty keys kept its last frame. Every key is now repainted when it stops.
 
 ## 0.7.6 beta (2026-11-01)
 

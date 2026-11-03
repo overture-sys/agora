@@ -53,33 +53,22 @@ pub(crate) async fn bind(
 
 /// Only Agora's own pages and local programs may use the server. A web page
 /// open in the user's browser can't: its Origin is another site, and a
-/// DNS-rebound name shows up in Host.
+/// DNS-rebound name shows up in Host. Pages served by other local servers
+/// (another port on 127.0.0.1) are kept out too: only pages this server
+/// handed out carry its own port.
 fn local_request(headers: &HeaderMap, port: u16) -> bool {
+    let ours = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
-    let host_ok = [format!("127.0.0.1:{port}"), format!("localhost:{port}")]
-        .iter()
-        .any(|h| h.eq_ignore_ascii_case(host));
+    let host_ok = ours.iter().any(|h| h.eq_ignore_ascii_case(host));
     let origin_ok = match headers.get(header::ORIGIN) {
         // Node and .exe plugins usually send no Origin.
         None => true,
-        Some(o) => o.to_str().ok().is_some_and(local_origin),
+        Some(o) => o.to_str().ok().is_some_and(|o| {
+            ours.iter()
+                .any(|h| o.eq_ignore_ascii_case(&format!("http://{h}")))
+        }),
     };
     host_ok && origin_ok
-}
-
-/// http(s)://127.0.0.1, localhost or [::1], any port.
-fn local_origin(origin: &str) -> bool {
-    let o = origin.to_ascii_lowercase();
-    let Some(rest) = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) else {
-        return false;
-    };
-    let host = match rest.strip_prefix("[::1]") {
-        Some(after) => return after.is_empty() || after.starts_with(':'),
-        None => rest.split(':').next().unwrap_or(""),
-    };
-    let after = &rest[host.len()..];
-    matches!(host, "127.0.0.1" | "localhost")
-        && (after.is_empty() || (after.starts_with(':') && after[1..].bytes().all(|b| b.is_ascii_digit())))
 }
 
 async fn ws(upgrade: WebSocketUpgrade, State(s): State<Shared>) -> Response {
@@ -235,8 +224,13 @@ mod tests {
         };
         assert!(h("127.0.0.1:5000", None));
         assert!(h("localhost:5000", Some("http://127.0.0.1:5000")));
-        assert!(h("127.0.0.1:5000", Some("http://localhost")));
-        assert!(h("127.0.0.1:5000", Some("http://[::1]:8080")));
+        assert!(h("127.0.0.1:5000", Some("http://LOCALHOST:5000")));
+        // Pages from other local servers don't get in.
+        assert!(!h("127.0.0.1:5000", Some("http://localhost")));
+        assert!(!h("127.0.0.1:5000", Some("http://127.0.0.1:5173")));
+        assert!(!h("127.0.0.1:5000", Some("http://[::1]:8080")));
+        assert!(!h("127.0.0.1:5000", Some("https://127.0.0.1:5000")));
+        assert!(!h("127.0.0.1:5000", Some("http://127.0.0.1:50000")));
         assert!(!h("127.0.0.1:5000", Some("https://evil.example")));
         assert!(!h("127.0.0.1:5000", Some("http://127.0.0.1.evil.example")));
         assert!(!h("127.0.0.1:5000", Some("http://localhost.evil.example:5000")));

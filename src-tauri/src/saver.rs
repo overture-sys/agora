@@ -561,15 +561,49 @@ struct Gif {
     at: usize,
 }
 
+/// Checks a picture or video the user picked: a file on this computer, not a
+/// network path (reading `\\server\share\...` would send the user's
+/// Windows sign-in to that server), with one of `exts`, no bigger than
+/// `max_bytes`. Returns the path to read.
+pub(crate) fn local_media(path: &str, exts: &[&str], max_bytes: u64) -> Result<std::path::PathBuf, String> {
+    let path = path.trim();
+    if path.starts_with("\\\\") || path.starts_with("//") || path.contains("://") {
+        return Err("Pick a file on this computer, not a network path".into());
+    }
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() {
+        return Err("Pick a file with a full path".into());
+    }
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !exts.contains(&ext.as_str()) {
+        return Err(format!("Pick a {} file", exts.join(" or ").to_ascii_uppercase()));
+    }
+    let real = std::fs::canonicalize(p).map_err(|e| e.to_string())?;
+    // A link can still point at a network share.
+    let shown = real.to_string_lossy();
+    if shown.starts_with("\\\\?\\UNC\\") || shown.starts_with("//") {
+        return Err("Pick a file on this computer, not a network path".into());
+    }
+    let meta = std::fs::metadata(&real).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("That isn't a file".into());
+    }
+    if meta.len() > max_bytes {
+        return Err(format!("That file is over {} MB", max_bytes / (1024 * 1024)));
+    }
+    Ok(real)
+}
+
 impl Gif {
     /// Reads a GIF and fits each frame to the dock (filling it, cropped).
     /// Big files are refused so a huge GIF can't eat memory.
     fn open(path: &str, w: u32, h: u32) -> Option<Self> {
         use image::AnimationDecoder;
-        let meta = std::fs::metadata(path).ok()?;
-        if meta.len() > 40 * 1024 * 1024 {
-            return None;
-        }
+        let path = local_media(path, &["gif"], 40 * 1024 * 1024).ok()?;
         let file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
         let decoder = image::codecs::gif::GifDecoder::new(file).ok()?;
         // A small file can still claim a huge picture; refuse those.
@@ -611,6 +645,23 @@ impl Painter for Gif {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_must_be_a_local_file_of_the_right_kind() {
+        let dir = std::env::temp_dir().join(format!("agora-media-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gif = dir.join("a.gif");
+        std::fs::write(&gif, b"GIF89a").unwrap();
+        let g = gif.to_str().unwrap();
+        assert!(local_media(g, &["gif"], 1024).is_ok());
+        assert!(local_media(g, &["mp4"], 1024).is_err());
+        assert!(local_media(g, &["gif"], 2).is_err());
+        assert!(local_media("a.gif", &["gif"], 1024).is_err());
+        assert!(local_media("\\\\evil\\share\\a.gif", &["gif"], 1024).is_err());
+        assert!(local_media("//evil/share/a.gif", &["gif"], 1024).is_err());
+        assert!(local_media(dir.to_str().unwrap(), &["gif"], 1024).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn every_show_paints_a_dock_sized_frame() {

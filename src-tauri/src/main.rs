@@ -657,6 +657,9 @@ fn set_screen_saver(state: State<Shared>, mode: String, minutes: u32, gif: Strin
     if mode != "off" && !saver::SAVERS.iter().any(|(id, _)| *id == mode) {
         return Err("Unknown screen saver".into());
     }
+    if !gif.trim().is_empty() {
+        saver::local_media(&gif, &["gif"], 40 * 1024 * 1024)?;
+    }
     let mut dock = state.lock().unwrap();
     dock.settings.saver = mode;
     dock.settings.saver_minutes = minutes.clamp(1, 240);
@@ -684,6 +687,9 @@ fn set_intro(state: State<Shared>, intro: String, video: String, dock_intro: boo
     if !matches!(intro.as_str(), "update" | "agora" | "video" | "off") {
         return Err("Unknown intro".into());
     }
+    if !video.trim().is_empty() {
+        check_intro_video(&video)?;
+    }
     let mut dock = state.lock().unwrap();
     dock.settings.intro = intro;
     dock.settings.intro_video = video;
@@ -692,19 +698,31 @@ fn set_intro(state: State<Shared>, intro: String, video: String, dock_intro: boo
     Ok(())
 }
 
+/// Checks the user's intro video is one: a local MP4/WebM file whose
+/// first bytes say so, under 300 MB. Anything else is refused, so the
+/// setting can't be used to read some other file.
+fn check_intro_video(path: &str) -> Result<std::path::PathBuf, String> {
+    let real = saver::local_media(path, &["mp4", "webm", "m4v"], 300 * 1024 * 1024)?;
+    let mut head = [0u8; 12];
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open(&real).map_err(|e| e.to_string())?;
+        f.read_exact(&mut head).map_err(|_| "That isn't a video".to_string())?;
+    }
+    let mp4 = &head[4..8] == b"ftyp";
+    let webm = head[..4] == [0x1A, 0x45, 0xDF, 0xA3];
+    if !(mp4 || webm) {
+        return Err("That isn't an MP4 or WebM video".into());
+    }
+    Ok(real)
+}
+
 /// The user's intro video, as bytes the window turns into a video.
 #[tauri::command]
 fn intro_video(state: State<Shared>) -> Result<tauri::ipc::Response, String> {
     let path = state.lock().unwrap().settings.intro_video.clone();
-    let lower = path.to_ascii_lowercase();
-    if !(lower.ends_with(".mp4") || lower.ends_with(".webm") || lower.ends_with(".m4v")) {
-        return Err("Pick an MP4 or WebM video".into());
-    }
-    let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-    if size > 300 * 1024 * 1024 {
-        return Err("That video is over 300 MB".into());
-    }
-    std::fs::read(&path)
+    let real = check_intro_video(&path)?;
+    std::fs::read(real)
         .map(tauri::ipc::Response::new)
         .map_err(|e| e.to_string())
 }

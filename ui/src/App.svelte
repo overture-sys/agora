@@ -256,6 +256,30 @@
     return refreshing;
   }
 
+  // Page tabs being dragged to a new place.
+  let dragPage = $state<string | null>(null);
+  let dropPage = $state<string | null>(null);
+
+  async function movePage(id: string, to: number) {
+    if (!layout) return;
+    const from = layout.pages.findIndex((p) => p.id === id);
+    if (from < 0 || to < 0 || to >= layout.pages.length || to === from) return;
+    // Show the new order straight away; the host catches up.
+    const pages = [...layout.pages];
+    pages.splice(to, 0, ...pages.splice(from, 1));
+    layout = { ...layout, pages };
+    ownChangeUntil = performance.now() + 1000;
+    await call("layout_op", { op: "move-page", id, to });
+    await refreshPage();
+  }
+
+  function dropOnPage(target: string) {
+    const id = dragPage;
+    dragPage = dropPage = null;
+    if (!id || !layout || id === target) return;
+    movePage(id, layout.pages.findIndex((p) => p.id === target));
+  }
+
   async function layoutOp(op: string, id?: string, name?: string, apps?: string[]) {
     renaming = null;
     // Show the new tab straight away; the host catches up.
@@ -1315,14 +1339,21 @@
         </div>
       {/if}
       <nav class="tabs" aria-label="Pages">
-        {#each layout.pages as p}
+        {#each layout.pages as p, pi (p.id)}
           {@const active = p.id === layout.top_page}
           {#if renaming?.kind === "page" && renaming.id === p.id}
             <!-- svelte-ignore a11y_autofocus -->
             <input class="rename tab-input" bind:value={renaming.name} autofocus aria-label="Page name"
               onkeydown={(e) => e.key === "Enter" && finishRename()} onblur={finishRename} />
           {:else}
-            <span class="tab-wrap" class:active>
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <span class="tab-wrap" class:active class:dragging={dragPage === p.id} class:drop={dropPage === p.id && dragPage !== p.id}
+              draggable={layout.pages.length > 1}
+              ondragstart={(e) => { dragPage = p.id; e.dataTransfer?.setData("text/plain", p.id); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}
+              ondragover={(e) => { if (dragPage) { e.preventDefault(); dropPage = p.id; } }}
+              ondragleave={() => { if (dropPage === p.id) dropPage = null; }}
+              ondrop={(e) => { e.preventDefault(); dropOnPage(p.id); }}
+              ondragend={() => (dragPage = dropPage = null)}>
               <button
                 class="tab"
                 class:active
@@ -1335,6 +1366,16 @@
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4" /></svg>
                 </button>
                 {#if layout.pages.length > 1}
+                  {#if pi > 0}
+                    <button class="tab-edit" onclick={() => movePage(p.id, pi - 1)} aria-label="Move {p.name} left" title="Move this page left">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+                    </button>
+                  {/if}
+                  {#if pi < layout.pages.length - 1}
+                    <button class="tab-edit" onclick={() => movePage(p.id, pi + 1)} aria-label="Move {p.name} right" title="Move this page right">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7" /></svg>
+                    </button>
+                  {/if}
                   <button class="tab-edit bad" onclick={() => removeWithUndo("page", p.id)} aria-label="Delete {p.name}"
                     title="Delete this page and the folders on it. You can undo it.">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13" /></svg>

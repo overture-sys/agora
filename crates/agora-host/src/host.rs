@@ -253,6 +253,8 @@ pub enum LayoutOp {
     AddPage,
     RemovePage(String),
     RenamePage(String, String),
+    /// Moves a page to a new place among the profile's pages (0 = first).
+    MovePage(String, usize),
     AddProfile(String),
     RemoveProfile(String),
     RenameProfile(String, String),
@@ -3368,6 +3370,43 @@ impl State {
                     i.settings["name"] = json!(name);
                 }
                 if let Some(k) = key {
+                    self.redraw(k);
+                }
+            }
+            LayoutOp::MovePage(id, to) => {
+                let profile = self.layout.profile_mut();
+                let Some(from) = profile
+                    .pages
+                    .iter()
+                    .position(|p| p.id == id && p.parent.is_none())
+                else {
+                    return Err("Only pages can be moved here.".into());
+                };
+                let page = profile.pages.remove(from);
+                // Put it before the page that is now at `to`, or after the
+                // last page. Folders keep their places; they follow their
+                // parent page wherever it goes.
+                let tops: Vec<usize> = profile
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.parent.is_none())
+                    .map(|(i, _)| i)
+                    .collect();
+                let at = match tops.get(to) {
+                    Some(&i) => i,
+                    None => tops.last().map_or(0, |&i| i + 1),
+                };
+                profile.pages.insert(at, page);
+                // "Page 2 / 3" keys show the new number.
+                let indicators: Vec<usize> = self
+                    .layout
+                    .keys()
+                    .iter()
+                    .filter(|(_, i)| i.is_builtin(builtin::PAGE_INDICATOR))
+                    .map(|(k, _)| *k)
+                    .collect();
+                for k in indicators {
                     self.redraw(k);
                 }
             }

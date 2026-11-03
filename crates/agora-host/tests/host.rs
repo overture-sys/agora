@@ -1099,3 +1099,54 @@ fn the_old_layout_stays_with_its_model_whatever_was_used_since() {
     assert!(file.get("first_model").is_none());
     assert!(file["devices"]["MINI-1"].is_object());
 }
+
+#[test]
+fn pages_can_be_put_in_a_new_order() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    // Page 1 has a folder; pages 2 and 3 are added after it.
+    host.place(5, builtin::PLUGIN, builtin::FOLDER).unwrap();
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    host.place(0, builtin::PLUGIN, builtin::PAGE_INDICATOR).unwrap();
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title == "2 / 2"),
+    );
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    let names = |h: &HostHandle| -> Vec<String> {
+        h.layout().unwrap().pages.iter().map(|p| p.name.clone()).collect()
+    };
+    assert_eq!(names(&host), ["Page 1", "Page 2", "Page 3"]);
+    let ids: Vec<String> = host.layout().unwrap().pages.iter().map(|p| p.id.clone()).collect();
+
+    // Page 3 to the front, then Page 1 to the end (past the end is the end).
+    host.layout_op(LayoutOp::MovePage(ids[2].clone(), 0)).unwrap();
+    assert_eq!(names(&host), ["Page 3", "Page 1", "Page 2"]);
+    host.layout_op(LayoutOp::MovePage(ids[0].clone(), 9)).unwrap();
+    assert_eq!(names(&host), ["Page 3", "Page 2", "Page 1"]);
+
+    // The page indicator on Page 2 shows its new place.
+    host.layout_op(LayoutOp::MovePage(ids[1].clone(), 0)).unwrap();
+    assert_eq!(names(&host), ["Page 2", "Page 3", "Page 1"]);
+    host.layout_op(LayoutOp::GoToPage(ids[1].clone())).unwrap();
+    wait_for(
+        &rx,
+        5,
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title == "1 / 3"),
+    );
+
+    // Folders can't be moved as pages, and stay with their page.
+    host.layout_op(LayoutOp::GoToPage(ids[0].clone())).unwrap();
+    host.key(5, true);
+    host.key(5, false);
+    let folder = host.layout().unwrap().page;
+    assert!(host.layout_op(LayoutOp::MovePage(folder, 0)).is_err());
+    assert_eq!(host.layout().unwrap().pages.len(), 3);
+
+    // The order is saved.
+    drop(host);
+    std::thread::sleep(Duration::from_millis(200));
+    let (host, _rx) = start(data.path());
+    assert_eq!(names(&host), ["Page 2", "Page 3", "Page 1"]);
+}

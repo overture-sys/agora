@@ -651,6 +651,7 @@ fn layout_op(
     id: Option<String>,
     name: Option<String>,
     apps: Option<Vec<String>>,
+    to: Option<usize>,
 ) -> Result<(), String> {
     let id = id.unwrap_or_default();
     let name = name.unwrap_or_default();
@@ -659,6 +660,7 @@ fn layout_op(
         "add-page" => LayoutOp::AddPage,
         "remove-page" => LayoutOp::RemovePage(id),
         "rename-page" => LayoutOp::RenamePage(id, name),
+        "move-page" => LayoutOp::MovePage(id, to.unwrap_or(0)),
         "add-profile" => LayoutOp::AddProfile(name),
         "remove-profile" => LayoutOp::RemoveProfile(id),
         "rename-profile" => LayoutOp::RenameProfile(id, name),

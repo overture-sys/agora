@@ -19,7 +19,7 @@ Your keys, profiles and settings live in `%APPDATA%\Agora` and are kept when you
 
 ## What it does
 - **Docks:** Stream Dock M18 (tested). Also M18 V3, 293V3, 293S (three versions), N3, N4 / N4 Pro and XL (untested).
-- **Also works with Elgato Stream Deck (early, untested):** Mini, Mini MK.2, Stream Deck (original and MK.2), XL and the Neo's keys. Quit the Elgato Stream Deck app first. Several devices can be plugged in at once; each keeps its own profiles.
+- **Also works with Elgato Stream Deck (early):** Mini (tested). Also Mini MK.2, Stream Deck (original and MK.2), XL and the Neo's keys (untested). Quit the Elgato Stream Deck app first. Several devices can be plugged in at once; each keeps its own profiles.
 - **Keys:** drag an action onto a key, button or knob. Your own title, title position, colour and icon on any key.
 - **Profiles, pages and folders.** A profile can follow an app: it comes up while that app is in front.
 - **Agora's own actions:** open an app, file or folder; website; hotkey (press the keys to record them); type text; media keys; quick controls (sleep, lock, show desktop, screen off, microphone mute, switch screens); quick tools (Calculator, emoji panel, Task Manager, search and more); close window; mouse click, scroll and move; browser back, forward, refresh and tabs; saved passwords (kept in Windows Credential Manager); soundboard; UDP network messages; web requests (Home Assistant, webhooks); run a PowerShell command and show its output; snippets picker; window tools (next screen, snap, maximise, keep on top); sound output switching and per-app volume; hotkey switch; dock brightness, dock sleep and the light ring; next, previous or go to page, page indicator; switch profile (or the next or previous one); folder.

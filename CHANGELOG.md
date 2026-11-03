@@ -4,7 +4,7 @@
 
 First Elgato Stream Deck support.
 
-- New: Agora drives Elgato Stream Decks with screen keys: Mini, Mini MK.2, Stream Deck (original and MK.2), XL and the Neo's keys. Plug one in next to your Stream Dock and pick it from the Device picker on the Keys page; it gets its own profiles and pages. Brightness works; knobs, touch strips and the Pedal come later. Untested on real hardware so far.
+- New: Agora drives Elgato Stream Decks with screen keys: Mini, Mini MK.2, Stream Deck (original and MK.2), XL and the Neo's keys. Plug one in next to your Stream Dock and pick it from the Device picker on the Keys page; it gets its own profiles and pages. Brightness works; knobs, touch strips and the Pedal come later. Tested on a Stream Deck Mini; the other models are untested.
 - Quit the Elgato Stream Deck app before starting Agora: both can't drive a deck at once.
 - Plugins see a Stream Deck Mini as device type 1, an XL as 2 and a Neo as 9, as Elgato's own app reports them.
 - Stream Deck support uses the elgato-streamdeck crate (MPL-2.0), unchanged.

@@ -135,7 +135,9 @@ pub fn spec(kind: Kind) -> DeviceSpec {
         max_image: 64 * 1024,
         plugin_type: plugin_type(kind),
         vsd_device: None,
-        tested: false,
+        // Tried by us on a Mini (2026-11-03): keys, plugins, brightness,
+        // screen saver, and the logo coming back on quit.
+        tested: kind == Kind::Mini,
     }
 }
 
@@ -281,6 +283,7 @@ mod tests {
         assert_eq!(s.orientation, Orientation::Transpose);
         assert_eq!(s.plugin_type, 1);
         assert_eq!(s.family, Family::StreamDeck);
+        assert!(s.tested && !spec(Kind::Xl).tested);
         assert!(supported(Kind::Mini) && !supported(Kind::Plus));
         assert_eq!(by_id("SDMINI"), Some(Kind::Mini));
         assert_eq!(by_id("SDPLUS"), None);

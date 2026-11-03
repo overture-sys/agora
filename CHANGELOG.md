@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 beta (2026-11-03)
+
+Groundwork for running more than one device, and for Stream Deck support later.
+
+- New: Agora opens every supported dock that is plugged in, not just the first, and each one keeps its own profiles, pages and keys. When Agora knows more than one device, the Keys page shows a Device picker.
+- Your existing layout carries over to your dock the first time it connects, and is copied to layout.json's folder as layout.before-multi-device.json before anything is saved. The layout file stays readable by older versions of Agora, which still see your first dock's profiles.
+- A layout file that can't be read is kept aside as layout.unreadable-<time>.json instead of being written over.
+- Plugins now see each device by its own id (its model and serial number), so a plugin used on two devices keeps them apart.
+- Under the hood: the device layer describes every device the same way and has one driver per family (Stream Dock today), so a Stream Deck driver can be added without touching the rest of Agora. No change to what the M18 is sent.
+
 ## 0.7.8 beta (2026-11-03)
 
 - New: Open keys can pick an installed app. "Installed app…" lists everything under Start › All apps, desktop programs and Store apps alike, with their icons and a search box. The key opens the app the way the Start menu does, and takes the app's icon if it has none of its own. File… and Folder… still work as before.

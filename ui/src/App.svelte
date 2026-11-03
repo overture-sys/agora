@@ -13,7 +13,9 @@
   type Status = {
     connected: boolean; model: string | null; model_id: string; model_name: string; rows: number; columns: number;
     buttons: number; dials: number; strip: boolean; ring_leds: number; tested: boolean; message: string;
+    device_id?: string; devices?: DeviceLine[];
   };
+  type DeviceLine = { id: string; name: string; model: string; connected: boolean };
   type Input = { kind: string; index: number; pressed: boolean; turn: number; raw_id: number };
   type Action = { plugin: string; plugin_name: string; category: string; action: string; name: string; tooltip: string; icon: string | null; group_icon: string | null; controllers: string[] };
   type Plugin = { uuid: string; name: string; version: string; source: string; kind: string; status: string; dir: string; hidden: boolean };
@@ -926,13 +928,25 @@
 
   /// A different model brings different keys, buttons and knobs.
   function setStatus(s: Status) {
-    const changed = s.model_id !== status.model_id;
+    const changed = s.model_id !== status.model_id || s.device_id !== status.device_id;
     status = s;
     if (changed) {
       loadKey(null);
       refreshPage();
       loadPreviews();
     }
+  }
+
+  /// Several devices: the editor shows one at a time.
+  async function selectDevice(id: string) {
+    const s = await call<Status>("select_device", { id });
+    if (s) setStatus(s);
+  }
+
+  function deviceLabel(d: DeviceLine) {
+    const same = (status.devices ?? []).filter((o) => o.name === d.name).length > 1;
+    const tail = same ? ` (${d.id.slice(d.model.length).replace(/^-/, "") || "1"})` : "";
+    return `${d.name}${tail}${d.connected ? "" : " · not connected"}`;
   }
 
   async function refreshStatus() {
@@ -1215,6 +1229,14 @@
 {#snippet pageBar()}
   {#if layout}
     <div class="pagebar">
+      {#if (status.devices ?? []).length > 1}
+        <div class="profile-row">
+          <span class="label">Device</span>
+          <select value={status.device_id} onchange={(e) => selectDevice(e.currentTarget.value)} aria-label="Device">
+            {#each status.devices ?? [] as d (d.id)}<option value={d.id}>{deviceLabel(d)}</option>{/each}
+          </select>
+        </div>
+      {/if}
       <div class="profile-row">
         <span class="label">Profile</span>
         {#if renaming?.kind === "profile"}

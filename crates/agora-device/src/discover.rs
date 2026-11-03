@@ -65,7 +65,18 @@ pub fn find(api: &HidApi) -> Vec<Found> {
 
 fn find_stream_docks(api: &HidApi) -> Vec<Found> {
     let mut out: Vec<Found> = Vec::new();
-    for d in api.device_list().filter(|d| is_vendor_interface(d)) {
+    // Where a model shows its command interface on 0xFFA0 (the M18 on
+    // Windows), other vendor pages of it are extra collections of the same
+    // dock, not more docks.
+    let exact: Vec<(u16, u16)> = api
+        .device_list()
+        .filter(|d| d.usage_page() == 0xFFA0)
+        .map(|d| (d.vendor_id(), d.product_id()))
+        .collect();
+    for d in api.device_list().filter(|d| {
+        is_vendor_interface(d)
+            && (d.usage_page() == 0xFFA0 || !exact.contains(&(d.vendor_id(), d.product_id())))
+    }) {
         let Some(model) = models::by_usb(d.vendor_id(), d.product_id()) else {
             continue;
         };

@@ -27,6 +27,7 @@ fn main() {
             columns: 5,
             buttons: 3,
             dials: 0,
+            ..Default::default()
         },
     };
     let host = HostHandle::start(config, tx).unwrap();
@@ -50,7 +51,7 @@ fn main() {
             pressed = true;
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(HostEvent::Face { key, face: f }) => {
+            Ok(HostEvent::Face { key, face: f, .. }) => {
                 println!(
                     "face {key}: title={:?} image={} overlay={:?}",
                     f.title,

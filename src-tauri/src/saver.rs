@@ -57,28 +57,39 @@ pub enum Show {
     Saver { mode: String, gif: String },
 }
 
-/// Starts a show, replacing any that is playing.
+/// Starts a show on every connected dock, replacing any that is playing.
 pub fn start(app: &AppHandle, show: Show) {
+    start_on(app, show, None);
+}
+
+/// Starts a show on one dock (`only`) or on all of them.
+pub fn start_on(app: &AppHandle, show: Show, only: Option<&str>) {
     let shared = app.state::<Shared>().inner().clone();
-    let (model, connected) = {
+    let docks: Vec<(String, DeviceSpec)> = {
         let dock = shared.lock().unwrap();
-        (dock.current_spec(), dock.worker.is_some())
+        dock.docks
+            .iter()
+            .filter(|a| only.is_none_or(|o| o == a.id) && !a.spec.keys.is_empty())
+            .map(|a| (a.id.clone(), a.spec.clone()))
+            .collect()
     };
-    if !connected || model.keys.is_empty() {
+    if docks.is_empty() {
         return;
     }
     let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
     ACTIVE.store(true, Ordering::SeqCst);
-    let app = app.clone();
-    let _ = std::thread::Builder::new()
-        .name("agora-show".into())
-        .spawn(move || {
-            play(&shared, &model, gen, show);
-            // Ended on its own (the intro): give the keys back.
-            if GEN.load(Ordering::SeqCst) == gen {
-                finish(&app);
-            }
-        });
+    for (id, model) in docks {
+        let (app, shared, show) = (app.clone(), shared.clone(), show.clone());
+        let _ = std::thread::Builder::new()
+            .name("agora-show".into())
+            .spawn(move || {
+                play(&shared, &id, &model, gen, show);
+                // Ended on its own (the intro): give the keys back.
+                if GEN.load(Ordering::SeqCst) == gen {
+                    finish(&app);
+                }
+            });
+    }
 }
 
 /// Stops a show if one is playing. True if it was.
@@ -103,7 +114,7 @@ fn finish(app: &AppHandle) {
     }
 }
 
-fn play(shared: &Shared, model: &DeviceSpec, gen: u64, show: Show) {
+fn play(shared: &Shared, device: &str, model: &DeviceSpec, gen: u64, show: Show) {
     let size = model.key_size();
     let (w, h) = (size * model.columns as u32, size * model.rows as u32);
     let grid = Grid { cols: model.columns as u32, rows: model.rows as u32, size };
@@ -142,7 +153,7 @@ fn play(shared: &Shared, model: &DeviceSpec, gen: u64, show: Show) {
                 if GEN.load(Ordering::SeqCst) != gen {
                     return;
                 }
-                match dock.worker.as_ref() {
+                match dock.worker_for(device) {
                     Some(wk) => {
                         wk.send(Command::SetKeyImage(i, jpeg));
                     }

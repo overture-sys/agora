@@ -41,6 +41,7 @@ fn start(data: &std::path::Path) -> (HostHandle, Receiver<HostEvent>) {
             columns: 5,
             buttons: 3,
             dials: 2,
+            ..Default::default()
         },
     };
     (HostHandle::start(config, tx).unwrap(), rx)
@@ -59,7 +60,13 @@ fn wait_for(
             if pred(&ev) {
                 return ev;
             }
-            seen.push(format!("{ev:?}").chars().take(160).collect::<String>());
+            let mut line = format!("{ev:?}");
+            // Pictures say nothing in a failure report.
+            while let Some(at) = line.find("Some(\"data:") {
+                let end = line[at..].find("\")").map_or(line.len(), |e| at + e + 2);
+                line.replace_range(at..end, "<picture>");
+            }
+            seen.push(line.chars().take(200).collect::<String>());
         }
     }
     panic!("event not seen; got:\n{}", seen.join("\n"));
@@ -110,7 +117,7 @@ fn node_plugin_round_trip() {
     wait_for(
         &rx,
         10,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello" && face.image.is_some()),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title == "hello" && face.image.is_some()),
     );
 
     host.key(0, true);
@@ -118,12 +125,12 @@ fn node_plugin_round_trip() {
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.overlay == Overlay::Ok),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.overlay == Overlay::Ok),
     );
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "n=1"),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title == "n=1"),
     );
 
     // Settings panel: the page is served with the connect script added.
@@ -200,7 +207,7 @@ fn layout_survives_restart() {
         wait_for(
             &rx,
             10,
-            |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "hello"),
+            |e| matches!(e, HostEvent::Face { key: 4, face, .. } if face.title == "hello"),
         );
     }
     let (host, rx) = start(data.path());
@@ -208,7 +215,7 @@ fn layout_survives_restart() {
     wait_for(
         &rx,
         10,
-        |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "hello"),
+        |e| matches!(e, HostEvent::Face { key: 4, face, .. } if face.title == "hello"),
     );
     assert_eq!(host.key_info(4).unwrap().name, "Counter");
 }
@@ -225,7 +232,7 @@ fn moving_a_key_keeps_the_action_and_swaps() {
     wait_for(
         &rx,
         10,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello"),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title == "hello"),
     );
     let context = host.key_info(0).unwrap().settings_url.unwrap();
 
@@ -234,12 +241,12 @@ fn moving_a_key_keeps_the_action_and_swaps() {
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.image.is_none() && face.title.is_empty()),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.image.is_none() && face.title.is_empty()),
     );
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 3, face } if face.title == "hello"),
+        |e| matches!(e, HostEvent::Face { key: 3, face, .. } if face.title == "hello"),
     );
     assert!(host.key_info(0).is_none());
     let moved = host.key_info(3).unwrap().settings_url.unwrap();
@@ -258,7 +265,7 @@ fn moving_a_key_keeps_the_action_and_swaps() {
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 3, face } if face.title == "n=1"),
+        |e| matches!(e, HostEvent::Face { key: 3, face, .. } if face.title == "n=1"),
     );
 
     // Onto a used key: the two swap.
@@ -285,7 +292,7 @@ fn hiding_and_forgetting_plugins() {
     wait_for(
         &rx,
         10,
-        |e| matches!(e, HostEvent::Face { key: 2, face } if face.title == "hello"),
+        |e| matches!(e, HostEvent::Face { key: 2, face, .. } if face.title == "hello"),
     );
 
     // Hiding clears its keys and takes its actions out of the list.
@@ -353,7 +360,7 @@ fn pages_folders_and_profiles() {
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 5, face } if face.title == "Games"),
+        |e| matches!(e, HostEvent::Face { key: 5, face, .. } if face.title == "Games"),
     );
     host.key(5, true);
     host.key(5, false);
@@ -377,7 +384,7 @@ fn pages_folders_and_profiles() {
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 5, face } if face.title == "Play"),
+        |e| matches!(e, HostEvent::Face { key: 5, face, .. } if face.title == "Play"),
     );
 
     // Profiles: a new one starts with one empty page; switching back keeps the old.
@@ -423,14 +430,14 @@ fn plugins_hear_about_page_changes() {
     wait_for(
         &rx,
         10,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "hello"),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title == "hello"),
     );
     host.key(0, true);
     host.key(0, false);
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "n=1"),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title == "n=1"),
     );
     let first = host.layout().unwrap().page;
 
@@ -438,7 +445,7 @@ fn plugins_hear_about_page_changes() {
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title.is_empty() && face.image.is_none()),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title.is_empty() && face.image.is_none()),
     );
     // The plugin keeps running for the page that isn't showing.
     assert_eq!(host.plugins()[0].status, "running");
@@ -447,7 +454,7 @@ fn plugins_hear_about_page_changes() {
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key: 0, face } if face.title == "n=1"),
+        |e| matches!(e, HostEvent::Face { key: 0, face, .. } if face.title == "n=1"),
     );
 }
 
@@ -547,7 +554,7 @@ fn buttons_and_knobs_hold_actions() {
     host.layout_op(LayoutOp::GoToPage(first.clone())).unwrap();
     host.key(b, true);
     host.key(b, false);
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::PageChanged));
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::PageChanged { .. }));
     assert_ne!(host.layout().unwrap().page, first);
 
     // Buttons and knobs are per page; back on the first page the knob runs
@@ -591,32 +598,32 @@ fn plugins_hear_knobs() {
     wait_for(
         &rx,
         10,
-        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "hello"),
+        |e| matches!(e, HostEvent::Face { key, face, .. } if *key == d && face.title == "hello"),
     );
     host.dial(1, DialInput::Turn(2));
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "Encoder 2"),
+        |e| matches!(e, HostEvent::Face { key, face, .. } if *key == d && face.title == "Encoder 2"),
     );
     host.dial(1, DialInput::Press);
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "down"),
+        |e| matches!(e, HostEvent::Face { key, face, .. } if *key == d && face.title == "down"),
     );
     host.dial(1, DialInput::Turn(-1));
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "Encoder -1 held"),
+        |e| matches!(e, HostEvent::Face { key, face, .. } if *key == d && face.title == "Encoder -1 held"),
     );
     host.dial(1, DialInput::Release);
     host.dial(1, DialInput::Tap);
     wait_for(
         &rx,
         5,
-        |e| matches!(e, HostEvent::Face { key, face } if *key == d && face.title == "tap"),
+        |e| matches!(e, HostEvent::Face { key, face, .. } if *key == d && face.title == "tap"),
     );
 }
 
@@ -682,7 +689,7 @@ fn information_actions_go_on_keys_and_plugins_switch_profiles() {
     wait_for(
         &rx,
         10,
-        |e| matches!(e, HostEvent::Face { key, face } if *key == 0 && face.title == "hello"),
+        |e| matches!(e, HostEvent::Face { key, face, .. } if *key == 0 && face.title == "hello"),
     );
 
     // Its key press asks for the profile called "Second".
@@ -709,7 +716,7 @@ fn monitor_keys_fill_in_live_readings() {
     };
     // The sampler reads every 2 seconds; the face then changes from "–".
     wait_for(&rx, 8, |e| {
-        matches!(e, HostEvent::Face { key: 3, face } if face.image.is_some() && face.image != first)
+        matches!(e, HostEvent::Face { key: 3, face, .. } if face.image.is_some() && face.image != first)
     });
 }
 
@@ -722,7 +729,7 @@ fn page_indicator_and_next_profile() {
     let first_page = host.layout().unwrap().pages[0].id.clone();
     host.layout_op(LayoutOp::GoToPage(first_page)).unwrap();
     host.place(4, builtin::PLUGIN, builtin::PAGE_INDICATOR).unwrap();
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 4, face } if face.title == "1 / 2"));
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 4, face, .. } if face.title == "1 / 2"));
 
     host.layout_op(LayoutOp::AddProfile("Second".into())).unwrap();
     let ids: Vec<String> = host.layout().unwrap().profiles.iter().map(|p| p.id.clone()).collect();
@@ -794,7 +801,7 @@ fn hold_actions_counters_timers_and_hotkey_switch() {
     host.set_settings(3, serde_json::json!({ "minutes": 0, "seconds": 1 }));
     host.key(3, true);
     host.key(3, false);
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 3, face } if face.image.as_deref().is_some_and(|i| {
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 3, face, .. } if face.image.as_deref().is_some_and(|i| {
         let b = i.trim_start_matches("data:image/svg+xml;base64,");
         String::from_utf8(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).unwrap()).unwrap().contains("DONE")
     })));
@@ -811,7 +818,7 @@ fn hold_actions_counters_timers_and_hotkey_switch() {
         }
     };
     host.action_result(&context, true, Some("hello there".into()));
-    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 5, face } if face.title == "hello there"));
+    wait_for(&rx, 5, |e| matches!(e, HostEvent::Face { key: 5, face, .. } if face.title == "hello there"));
 }
 
 #[test]
@@ -867,4 +874,228 @@ fn redrawing_everything_repaints_empty_keys_too() {
         }
     }
     assert_eq!(seen.len(), 15, "keys redrawn: {seen:?}");
+}
+
+// ---- several devices -------------------------------------------------------
+
+fn desc(id: &str, model: &str, rows: usize, columns: usize) -> DeviceDesc {
+    DeviceDesc {
+        id: id.into(),
+        model: model.into(),
+        name: format!("Test {model}"),
+        rows,
+        columns,
+        ..Default::default()
+    }
+}
+
+/// A host whose model last used is the M18 (as the app passes it).
+fn start_m18(data: &std::path::Path) -> (HostHandle, Receiver<HostEvent>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let config = Config {
+        plugin_dirs: vec![(fixtures(), Source::Agora)],
+        data_dir: data.to_path_buf(),
+        node: None,
+        device: desc("M18", "M18", 3, 5),
+    };
+    (HostHandle::start(config, tx).unwrap(), rx)
+}
+
+fn saved(data: &std::path::Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(data.join("layout.json")).unwrap()).unwrap()
+}
+
+const OLD_LAYOUT: &str = r#"{"profiles":[{"id":"P1","name":"Devin","current":"G1","pages":[{"id":"G1","name":"Page 1","keys":{"2":{"context":"K2","plugin":"com.agora.builtin","action":"website","settings":{"url":"https://repp.example"}}}}]}],"active":"P1","global_settings":{},"hidden":[]}"#;
+
+#[test]
+fn an_old_layout_goes_to_the_first_dock_of_its_model_and_is_backed_up() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("layout.json"), OLD_LAYOUT).unwrap();
+    let (mut host, rx) = start_m18(data.path());
+    // Kept as it was before anything is saved over it.
+    assert_eq!(
+        std::fs::read_to_string(data.path().join("layout.before-multi-device.json")).unwrap(),
+        OLD_LAYOUT
+    );
+
+    // Another model doesn't take it: it gets a layout of its own.
+    host.set_device(desc("N3-77", "N3", 2, 3));
+    host.device_connected_on("N3-77", true);
+    // The M18, known by its serial now, does.
+    host.set_device(desc("M18-ABC", "M18", 3, 5));
+    host.device_connected_on("M18-ABC", true);
+    wait_for(&rx, 5, |e| {
+        matches!(e, HostEvent::Face { device, key: 2, face } if device == "M18-ABC" && face.image.is_some())
+    });
+    let devices = host.devices();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[0].device.id, "M18-ABC");
+    assert!(devices[0].selected && devices[0].connected);
+    assert_eq!(host.key_info(2).unwrap().settings["url"], "https://repp.example");
+    assert_eq!(host.layout().unwrap().profiles[0].name, "Devin");
+    host.shutdown();
+
+    // Saved where older Agoras still find it, with the M18 named.
+    let file = saved(data.path());
+    assert_eq!(file["device"]["id"], "M18-ABC");
+    assert_eq!(file["profiles"][0]["name"], "Devin");
+    assert_eq!(
+        file["profiles"][0]["pages"][0]["keys"]["2"]["settings"]["url"],
+        "https://repp.example"
+    );
+    assert_eq!(file["devices"]["N3-77"]["device"]["model"], "N3");
+    assert_eq!(file["devices"]["N3-77"]["profiles"][0]["name"], "Default");
+}
+
+#[test]
+fn each_device_keeps_its_own_keys_and_pages() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("layout.json"), OLD_LAYOUT).unwrap();
+    let (mut host, rx) = start_m18(data.path());
+    host.set_device(desc("M18-ABC", "M18", 3, 5));
+    host.device_connected_on("M18-ABC", true);
+    host.set_device(desc("MINI-1", "Mini", 2, 3));
+    host.device_connected_on("MINI-1", true);
+
+    // The editor still shows the M18 until told otherwise.
+    assert!(host.key_info(0).is_none());
+    host.select_device("MINI-1");
+    assert!(host.key_info(2).is_none(), "the Mini starts empty");
+    host.place(0, builtin::PLUGIN, "website").unwrap();
+    host.set_settings(0, serde_json::json!({ "url": "https://mini.example" }));
+    host.layout_op(LayoutOp::AddPage).unwrap();
+    let pages = host.layout().unwrap().pages;
+    assert_eq!(pages.len(), 2);
+    host.layout_op(LayoutOp::GoToPage(pages[0].id.clone())).unwrap();
+
+    // A press on the Mini runs the Mini's key, wherever the editor is.
+    host.select_device("M18-ABC");
+    assert_eq!(host.layout().unwrap().pages.len(), 1);
+    host.key_on("MINI-1", 0, true);
+    host.key_on("MINI-1", 0, false);
+    wait_for(&rx, 5, |e| {
+        matches!(e, HostEvent::Run { device, settings, .. } if device == "MINI-1" && settings["url"] == "https://mini.example")
+    });
+    host.key_on("M18-ABC", 2, true);
+    host.key_on("M18-ABC", 2, false);
+    wait_for(&rx, 5, |e| {
+        matches!(e, HostEvent::Run { device, settings, .. } if device == "M18-ABC" && settings["url"] == "https://repp.example")
+    });
+    // A device that never connected is ignored.
+    host.key_on("NOPE", 0, true);
+    assert_eq!(host.key_info(2).unwrap().settings["url"], "https://repp.example");
+    host.shutdown();
+
+    // Both survive a restart, each on its own device.
+    let (host, _rx) = start_m18(data.path());
+    assert_eq!(host.devices().len(), 2);
+    assert_eq!(host.key_info(2).unwrap().settings["url"], "https://repp.example");
+    host.select_device("MINI-1");
+    assert_eq!(host.key_info(0).unwrap().settings["url"], "https://mini.example");
+    assert_eq!(host.layout().unwrap().pages.len(), 2);
+}
+
+#[test]
+fn a_device_without_a_serial_keeps_the_model_id() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("layout.json"), OLD_LAYOUT).unwrap();
+    let (mut host, _rx) = start_m18(data.path());
+    host.set_device(desc("M18", "M18", 3, 5));
+    host.device_connected_on("M18", true);
+    assert_eq!(host.key_info(2).unwrap().settings["url"], "https://repp.example");
+    host.shutdown();
+    assert_eq!(saved(data.path())["device"]["id"], "M18");
+}
+
+#[test]
+fn an_unreadable_layout_is_kept_aside() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("layout.json"), "{ not json").unwrap();
+    let (mut host, _rx) = start_m18(data.path());
+    host.shutdown();
+    let kept: Vec<String> = std::fs::read_dir(data.path())
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with("layout.unreadable-"))
+        .collect();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(data.path().join(&kept[0])).unwrap(),
+        "{ not json"
+    );
+}
+
+#[test]
+fn plugins_hear_each_device_by_its_own_id() {
+    if !node_ok() {
+        eprintln!("skipping: needs Node 22+ on PATH");
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let (_host_keep, rx) = start_m18(data.path());
+    let host = &_host_keep;
+    host.set_device(desc("M18-ABC", "M18", 3, 5));
+    host.device_connected_on("M18-ABC", true);
+    host.set_device(desc("MINI-1", "Mini", 2, 3));
+    host.device_connected_on("MINI-1", true);
+    host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .unwrap();
+    host.select_device("MINI-1");
+    host.place(0, "com.agora.testplugin", "com.agora.testplugin.counter")
+        .unwrap();
+    wait_for(&rx, 10, |e| {
+        matches!(e, HostEvent::Face { device, key: 0, face } if device == "MINI-1" && face.title == "hello")
+    });
+    // Same key, same action, two devices: the press and the plugin's answer
+    // stay on the device pressed.
+    host.key_on("MINI-1", 0, true);
+    host.key_on("MINI-1", 0, false);
+    wait_for(&rx, 5, |e| {
+        matches!(e, HostEvent::Face { device, key: 0, face } if device == "MINI-1" && face.title == "n=1")
+    });
+    for n in 1..=2 {
+        host.key_on("M18-ABC", 0, true);
+        host.key_on("M18-ABC", 0, false);
+        let title = format!("n={n}");
+        wait_for(&rx, 5, |e| {
+            matches!(e, HostEvent::Face { device, key: 0, face } if device == "M18-ABC" && face.title == title)
+        });
+    }
+    wait_for(&rx, 5, |e| {
+        matches!(e, HostEvent::Face { device, key: 0, face } if device == "M18-ABC" && face.overlay == Overlay::None)
+    });
+    assert_eq!(host.key_info(0).unwrap().settings["count"], 1);
+    host.select_device("M18-ABC");
+    assert_eq!(host.key_info(0).unwrap().settings["count"], 2);
+}
+
+#[test]
+fn the_old_layout_stays_with_its_model_whatever_was_used_since() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("layout.json"), OLD_LAYOUT).unwrap();
+    // First run: only another model connects. The M18 layout waits.
+    let (mut host, _rx) = start_m18(data.path());
+    host.set_device(desc("MINI-1", "Mini", 2, 3));
+    host.device_connected_on("MINI-1", true);
+    host.shutdown();
+    assert_eq!(saved(data.path())["first_model"], "M18");
+    // Next run the app's last model is the Mini; the layout still waits for
+    // an M18, and the Mini keeps its own.
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let config = Config {
+        plugin_dirs: vec![(fixtures(), Source::Agora)],
+        data_dir: data.path().to_path_buf(),
+        node: None,
+        device: desc("Mini", "Mini", 2, 3),
+    };
+    let mut host = HostHandle::start(config, tx).unwrap();
+    host.set_device(desc("MINI-1", "Mini", 2, 3));
+    host.set_device(desc("M18-ABC", "M18", 3, 5));
+    host.select_device("M18-ABC");
+    assert_eq!(host.key_info(2).unwrap().settings["url"], "https://repp.example");
+    host.shutdown();
+    let file = saved(data.path());
+    assert_eq!(file["device"]["id"], "M18-ABC");
+    assert!(file.get("first_model").is_none());
+    assert!(file["devices"]["MINI-1"].is_object());
 }

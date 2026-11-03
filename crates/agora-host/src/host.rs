@@ -18,10 +18,15 @@ use crate::stats;
 use crate::vsd_import;
 use crate::{server, Config};
 
-/// The dock as plugins see it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// A device as plugins and the layout see it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DeviceDesc {
+    /// The device's own id: plugins see it as `device`, and its layout is
+    /// kept under it. Stays the same between runs (model and serial).
     pub id: String,
+    /// The model id ("M18", "N4"...).
+    pub model: String,
     pub name: String,
     pub rows: usize,
     pub columns: usize,
@@ -29,6 +34,17 @@ pub struct DeviceDesc {
     pub buttons: usize,
     /// Knobs (the N3 and N4).
     pub dials: usize,
+    /// `deviceInfo.type` for plugins: 0 for Stream Docks (as VSD Craft).
+    pub kind: u8,
+}
+
+/// A device Agora keeps a layout for, for the editor's device picker.
+#[derive(Debug, Clone, Serialize)]
+pub struct KnownDevice {
+    pub device: DeviceDesc,
+    pub connected: bool,
+    /// The one the editor shows.
+    pub selected: bool,
 }
 
 /// Where buttons and knobs sit among a page's keys: screen keys count from
@@ -69,13 +85,15 @@ fn slot(key: usize) -> Slot {
 /// Things the app should do or show.
 #[derive(Debug, Clone)]
 pub enum HostEvent {
-    /// Redraw a key.
+    /// Redraw a key of one device.
     Face {
+        device: String,
         key: usize,
         face: Face,
     },
     /// A built-in key was pressed: play its press bounce with this face.
     Pressed {
+        device: String,
         key: usize,
         face: Face,
     },
@@ -99,10 +117,16 @@ pub enum HostEvent {
         plugin: String,
         message: String,
     },
-    /// The dock went to another page or profile, or pages changed.
-    PageChanged,
+    /// A device was plugged in, went away, or the editor shows another.
+    DevicesChanged,
+    /// A device went to another page or profile, or pages changed.
+    PageChanged {
+        device: String,
+    },
     /// Carry out one of Agora's system actions (open, hotkey, media...).
     Run {
+        /// The device whose key ran it.
+        device: String,
         /// The key's action, so a result can be shown on it (see
         /// [`Host::action_result`]).
         context: String,
@@ -372,6 +396,38 @@ impl Profile {
     }
 }
 
+/// One device's profiles, while another device is the one being worked on
+/// (and, in the file, every device but the first).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct DeviceLayout {
+    #[serde(default)]
+    device: DeviceDesc,
+    #[serde(default)]
+    profiles: Vec<Profile>,
+    #[serde(default)]
+    active: String,
+}
+
+impl DeviceLayout {
+    /// The page showing on this device.
+    fn current_page(&self) -> Option<&Page> {
+        let p = self.profiles.iter().find(|p| p.id == self.active)?;
+        p.page(&p.current)
+    }
+}
+
+/// Every device's profiles, plus what all devices share.
+///
+/// One device at a time is "in focus": its profiles sit in `profiles` and
+/// `active`, so the code that edits and runs a page works on it without
+/// knowing devices exist. The others wait in `devices`; [`Layout::focus_on`]
+/// swaps one in.
+///
+/// The file keeps the first device's profiles (the one Agora had before it
+/// knew several devices) at the top, where older versions of Agora look,
+/// with its description in `device`, and every other device in `devices`.
+/// A file without `device` comes from before then: its profiles belong to
+/// the first device of the model last used that connects.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Layout {
     #[serde(default)]
@@ -379,6 +435,17 @@ struct Layout {
     /// The active profile.
     #[serde(default)]
     active: String,
+    /// In the file: the first device, or none if it isn't known yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device: Option<DeviceDesc>,
+    /// In the file: every other device. In memory: every device not in
+    /// focus.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    devices: BTreeMap<String, DeviceLayout>,
+    /// While the first device isn't known: the model its layout was made
+    /// for, kept from the first run that saw the old file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_model: Option<String>,
     #[serde(default)]
     global_settings: HashMap<String, Value>,
     /// Plugins hidden from the action list.
@@ -387,9 +454,202 @@ struct Layout {
     /// Keys saved before profiles existed; moved to the first page on load.
     #[serde(default, skip_serializing)]
     keys: BTreeMap<usize, Instance>,
+    /// The device in focus, and what it is.
+    #[serde(skip)]
+    focus: String,
+    #[serde(skip)]
+    work_device: DeviceDesc,
+    /// The first device's id (its slot at the top of the file).
+    #[serde(skip)]
+    primary: String,
+    /// Whether the first device is known (the file had `device`).
+    #[serde(skip)]
+    claimed: bool,
+}
+
+/// The layout as it is written to the file.
+#[derive(Serialize)]
+struct LayoutFile<'a> {
+    profiles: &'a [Profile],
+    active: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device: Option<&'a DeviceDesc>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    devices: BTreeMap<&'a str, DeviceLayoutRef<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_model: Option<&'a str>,
+    global_settings: &'a HashMap<String, Value>,
+    hidden: &'a BTreeSet<String>,
+}
+
+#[derive(Serialize)]
+struct DeviceLayoutRef<'a> {
+    device: &'a DeviceDesc,
+    profiles: &'a [Profile],
+    active: &'a str,
 }
 
 impl Layout {
+    /// Sets up a layout just read from the file. `fallback` describes the
+    /// first device when the file doesn't (the model last used).
+    fn loaded(mut self, fallback: &DeviceDesc) -> Self {
+        match self.device.take() {
+            Some(d) => {
+                self.claimed = true;
+                self.work_device = d;
+            }
+            None => {
+                self.claimed = false;
+                self.work_device = fallback.clone();
+                let model = self
+                    .first_model
+                    .get_or_insert_with(|| fallback.model.clone())
+                    .clone();
+                // Known by its model until it connects, so no device of
+                // another model can be taken for it.
+                if model != fallback.model {
+                    self.work_device.model = model.clone();
+                    self.work_device.name = model.clone();
+                }
+                if !model.is_empty() {
+                    self.work_device.id = model;
+                }
+            }
+        }
+        // A device listed twice: the top of the file wins.
+        self.devices.remove(&self.work_device.id);
+        self.primary = self.work_device.id.clone();
+        self.focus = self.primary.clone();
+        for (id, d) in &mut self.devices {
+            d.device.id = id.clone();
+        }
+        self.fix();
+        self
+    }
+
+    /// What goes in the file.
+    fn file(&self) -> LayoutFile<'_> {
+        let mut devices: BTreeMap<&str, DeviceLayoutRef<'_>> = BTreeMap::new();
+        let working = DeviceLayoutRef {
+            device: &self.work_device,
+            profiles: &self.profiles,
+            active: &self.active,
+        };
+        let mut first = None;
+        if self.focus == self.primary {
+            first = Some(working);
+        } else {
+            devices.insert(&self.focus, working);
+        }
+        for (id, d) in &self.devices {
+            let r = DeviceLayoutRef {
+                device: &d.device,
+                profiles: &d.profiles,
+                active: &d.active,
+            };
+            if *id == self.primary {
+                first = Some(r);
+            } else {
+                devices.insert(id, r);
+            }
+        }
+        let first = first.unwrap_or(DeviceLayoutRef {
+            device: &self.work_device,
+            profiles: &[],
+            active: "",
+        });
+        LayoutFile {
+            profiles: first.profiles,
+            active: first.active,
+            device: self.claimed.then_some(first.device),
+            devices,
+            first_model: if self.claimed {
+                None
+            } else {
+                self.first_model.as_deref()
+            },
+            global_settings: &self.global_settings,
+            hidden: &self.hidden,
+        }
+    }
+
+    /// Every device with a layout: the one in focus first.
+    fn device_ids(&self) -> Vec<String> {
+        let mut out = vec![self.focus.clone()];
+        out.extend(self.devices.keys().cloned());
+        out
+    }
+
+    fn has_device(&self, id: &str) -> bool {
+        self.focus == id || self.devices.contains_key(id)
+    }
+
+    fn desc_of(&self, id: &str) -> Option<&DeviceDesc> {
+        if self.focus == id {
+            Some(&self.work_device)
+        } else {
+            self.devices.get(id).map(|d| &d.device)
+        }
+    }
+
+    /// Brings a device's profiles into focus, making it a fresh layout
+    /// (one empty page) if it has none yet.
+    fn focus_on(&mut self, id: &str) {
+        if self.focus == id {
+            return;
+        }
+        let parked = DeviceLayout {
+            device: std::mem::take(&mut self.work_device),
+            profiles: std::mem::take(&mut self.profiles),
+            active: std::mem::take(&mut self.active),
+        };
+        let old = std::mem::replace(&mut self.focus, id.to_string());
+        self.devices.insert(old, parked);
+        let next = self.devices.remove(id).unwrap_or_else(|| DeviceLayout {
+            device: DeviceDesc {
+                id: id.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        self.work_device = next.device;
+        self.profiles = next.profiles;
+        self.active = next.active;
+        self.fix();
+    }
+
+    /// Gives a device's layout a new id (the first device, once it is
+    /// known by its serial).
+    fn rename_device(&mut self, from: &str, to: &str) {
+        if from == to || self.has_device(to) {
+            return;
+        }
+        if self.focus == from {
+            self.focus = to.to_string();
+            self.work_device.id = to.to_string();
+        } else if let Some(mut d) = self.devices.remove(from) {
+            d.device.id = to.to_string();
+            self.devices.insert(to.to_string(), d);
+        }
+        if self.primary == from {
+            self.primary = to.to_string();
+        }
+    }
+
+    /// The device whose page in front holds this action.
+    fn owner_of(&self, context: &str) -> Option<String> {
+        if self.keys().values().any(|i| i.context == context) {
+            return Some(self.focus.clone());
+        }
+        self.devices
+            .iter()
+            .find(|(_, d)| {
+                d.current_page()
+                    .is_some_and(|g| g.keys.values().any(|i| i.context == context))
+            })
+            .map(|(id, _)| id.clone())
+    }
+
     /// Makes sure there is a profile with a page, and that the active
     /// profile and its current page exist. Carries old layouts over.
     fn fix(&mut self) {
@@ -451,10 +711,11 @@ impl Layout {
             .keys
     }
 
-    /// Every placed action, on every page of every profile.
+    /// Every placed action, on every page of every profile of every device.
     fn instances(&self) -> impl Iterator<Item = &Instance> {
         self.profiles
             .iter()
+            .chain(self.devices.values().flat_map(|d| d.profiles.iter()))
             .flat_map(|p| p.pages.iter())
             .flat_map(|g| g.keys.values())
     }
@@ -558,11 +819,16 @@ pub(crate) enum Msg {
     Move(usize, usize),
     SetHidden(String, bool),
     Forget(String, oneshot::Sender<Option<PathBuf>>),
-    Key(usize, bool),
-    Dial(usize, DialInput),
-    Swipe(i32),
-    DeviceConnected(bool),
+    /// Input from a device, or from the editor (`None`: the device it shows).
+    Key(Option<String>, usize, bool),
+    Dial(Option<String>, usize, DialInput),
+    Swipe(Option<String>, i32),
+    DeviceConnected(Option<String>, bool),
+    /// A device is plugged in (or its description changed).
     Device(DeviceDesc),
+    /// The editor shows another device.
+    Select(String),
+    Devices(oneshot::Sender<Vec<KnownDevice>>),
     Actions(oneshot::Sender<Vec<ActionInfo>>),
     Plugins(oneshot::Sender<Vec<PluginInfo>>),
     KeyInfo(usize, oneshot::Sender<Option<KeyInfo>>),
@@ -575,8 +841,10 @@ pub(crate) enum Msg {
     Layout(LayoutOp, oneshot::Sender<Result<(), String>>),
     /// Redraw keys whose face changed; `true` sends every face again.
     AllFaces(bool),
-    /// The rest of a multi-action, after a pause.
-    Steps(Vec<Value>),
+    /// Send every face of one device again.
+    AllFacesOn(String),
+    /// The rest of a multi-action, after a pause, on its device.
+    Steps(String, Vec<Value>),
     /// Puts back what the last removal took away.
     Undo(oneshot::Sender<bool>),
     Shutdown(oneshot::Sender<()>),
@@ -584,8 +852,8 @@ pub(crate) enum Msg {
     Stats(Box<stats::Snapshot>),
     /// Twice a second, for clocks, timers and stopwatches.
     Tick,
-    /// A key has been down long enough to count as held.
-    HoldTimer(usize, u64),
+    /// A key of a device has been down long enough to count as held.
+    HoldTimer(String, usize, u64),
     SetHold(usize, Vec<Value>),
     /// How an action the app ran went: ok or not, and text to show.
     ActionResult(String, bool, Option<String>),
@@ -634,8 +902,8 @@ impl HostHandle {
             .collect();
         let (tx, rx) = mpsc::unbounded_channel();
         let port = runtime.block_on(server::bind(Arc::new(plugin_dirs), tx.clone()))?;
-        let mut layout = load_layout(&config.data_dir);
-        layout.fix();
+        let layout = load_layout(&config.data_dir, &config.device);
+        let first = layout.focus.clone();
         let stats_tx = tx.clone();
         let stats_ctl = stats::start(move |s| stats_tx.send(Msg::Stats(Box::new(s))).is_ok());
         let tick_tx = tx.clone();
@@ -658,18 +926,17 @@ impl HostHandle {
             running: HashMap::new(),
             status: HashMap::new(),
             restarts: HashMap::new(),
-            device_connected: false,
+            rt: Runtime::default(),
+            parked: HashMap::new(),
+            live: BTreeSet::from([first.clone()]),
+            ui_dev: first,
             dirty: false,
             events,
             tx: tx.clone(),
             image_cache: HashMap::new(),
-            shown: HashMap::new(),
-            down: HashMap::new(),
-            auto_from: None,
             undo: None,
             stats: stats::Snapshot::default(),
             stats_ctl,
-            holding: HashMap::new(),
             hold_seq: 0,
             watches: HashMap::new(),
             results: HashMap::new(),
@@ -753,39 +1020,75 @@ impl HostHandle {
         let _ = self.tx.send(Msg::HoldTime(ms));
     }
 
-    /// Presses and lets go of a key, as a tap.
+    /// Presses and lets go of a key of the device the editor shows, as a tap.
     pub fn press(&self, key: usize) {
-        let _ = self.tx.send(Msg::Key(key, true));
-        let _ = self.tx.send(Msg::Key(key, false));
+        let _ = self.tx.send(Msg::Key(None, key, true));
+        let _ = self.tx.send(Msg::Key(None, key, false));
     }
 
+    /// A key of the device the editor shows.
     pub fn key(&self, key: usize, pressed: bool) {
-        let _ = self.tx.send(Msg::Key(key, pressed));
+        let _ = self.tx.send(Msg::Key(None, key, pressed));
+    }
+
+    /// A key of one device.
+    pub fn key_on(&self, device: &str, key: usize, pressed: bool) {
+        let _ = self.tx.send(Msg::Key(Some(device.into()), key, pressed));
     }
 
     /// A knob, counted from 0 on the left.
     pub fn dial(&self, dial: usize, input: DialInput) {
-        let _ = self.tx.send(Msg::Dial(dial, input));
+        let _ = self.tx.send(Msg::Dial(None, dial, input));
+    }
+
+    pub fn dial_on(&self, device: &str, dial: usize, input: DialInput) {
+        let _ = self.tx.send(Msg::Dial(Some(device.into()), dial, input));
     }
 
     /// A swipe along the touch strip: next page to the left, previous to
     /// the right, like turning pages.
     pub fn swipe(&self, direction: i32) {
-        let _ = self.tx.send(Msg::Swipe(direction));
+        let _ = self.tx.send(Msg::Swipe(None, direction));
     }
 
+    pub fn swipe_on(&self, device: &str, direction: i32) {
+        let _ = self.tx.send(Msg::Swipe(Some(device.into()), direction));
+    }
+
+    /// The device the editor shows connected or went away.
     pub fn device_connected(&self, connected: bool) {
-        let _ = self.tx.send(Msg::DeviceConnected(connected));
+        let _ = self.tx.send(Msg::DeviceConnected(None, connected));
     }
 
-    /// A different model was plugged in.
+    /// One device connected or went away.
+    pub fn device_connected_on(&self, device: &str, connected: bool) {
+        let _ = self.tx.send(Msg::DeviceConnected(Some(device.into()), connected));
+    }
+
+    /// A device was plugged in: gives it its layout (a fresh one the first
+    /// time), or updates its description.
     pub fn set_device(&self, device: DeviceDesc) {
         let _ = self.tx.send(Msg::Device(device));
+    }
+
+    /// Shows another device's layout in the editor.
+    pub fn select_device(&self, device: &str) {
+        let _ = self.tx.send(Msg::Select(device.into()));
+    }
+
+    /// Every device Agora has a layout for.
+    pub fn devices(&self) -> Vec<KnownDevice> {
+        self.ask(Msg::Devices).unwrap_or_default()
     }
 
     /// Asks the host to send every key's face again (e.g. after a reconnect).
     pub fn redraw_all(&self) {
         let _ = self.tx.send(Msg::AllFaces(true));
+    }
+
+    /// Sends every face of one device again (it just connected).
+    pub fn redraw_device(&self, device: &str) {
+        let _ = self.tx.send(Msg::AllFacesOn(device.into()));
     }
 
     pub fn actions(&self) -> Vec<ActionInfo> {
@@ -883,28 +1186,25 @@ struct State {
     running: HashMap<String, Running>,
     status: HashMap<String, String>,
     restarts: HashMap<String, Vec<Instant>>,
-    device_connected: bool,
+    /// The device in focus: what it shows, what is held down on it.
+    rt: Runtime,
+    /// The same for every other device.
+    parked: HashMap<String, Runtime>,
+    /// Devices whose page in front is drawn and known to plugins: every
+    /// device that connected since Agora started, and the editor's.
+    live: BTreeSet<String>,
+    /// The device the editor shows; its requests go there.
+    ui_dev: String,
     dirty: bool,
     events: std::sync::mpsc::Sender<HostEvent>,
     tx: mpsc::UnboundedSender<Msg>,
     image_cache: HashMap<(String, String), Option<String>>,
-    /// Last face sent per key, so repeats don't go to the device again.
-    shown: HashMap<usize, Face>,
-    /// The action each held key was pressed on, so its keyUp goes there
-    /// even if the page changed in between.
-    down: HashMap<usize, String>,
-    /// While an app has brought its profile up: the profile to go back to
-    /// when another app comes to the front.
-    auto_from: Option<String>,
     /// The layout as it was before the last removal (a key, page, profile
     /// or plugin), until something else changes.
     undo: Option<Layout>,
     /// The latest readings for monitor keys, and the sampler's controls.
     stats: stats::Snapshot,
     stats_ctl: stats::Control,
-    /// Keys down that have an action for holding: which press, and whether
-    /// the hold action has run.
-    holding: HashMap<usize, (u64, bool)>,
     hold_seq: u64,
     /// Timers and stopwatches, by action context. Not saved.
     watches: HashMap<String, Watch>,
@@ -914,6 +1214,23 @@ struct State {
     clipboard: Option<Instance>,
     /// How long a key must be down to count as held.
     hold_time: Duration,
+}
+
+/// What the host keeps about one device while Agora runs.
+#[derive(Debug, Default)]
+struct Runtime {
+    connected: bool,
+    /// Last face sent per key, so repeats don't go to the device again.
+    shown: HashMap<usize, Face>,
+    /// The action each held key was pressed on, so its keyUp goes there
+    /// even if the page changed in between.
+    down: HashMap<usize, String>,
+    /// Keys down that have an action for holding: which press, and whether
+    /// the hold action has run.
+    holding: HashMap<usize, (u64, bool)>,
+    /// While an app has brought its profile up: the profile to go back to
+    /// when another app comes to the front.
+    auto_from: Option<String>,
 }
 
 /// A running or paused timer or stopwatch.
@@ -1005,15 +1322,47 @@ fn disk_drive(settings: &Value) -> String {
     }
 }
 
+/// A device as plugins see it in `deviceInfo`.
+fn device_info_of(d: &DeviceDesc) -> Value {
+    json!({
+        "id": d.id,
+        "name": d.name,
+        "size": { "columns": d.columns, "rows": d.rows },
+        "type": d.kind,
+    })
+}
+
 fn layout_path(dir: &std::path::Path) -> PathBuf {
     dir.join("layout.json")
 }
 
-fn load_layout(dir: &std::path::Path) -> Layout {
-    std::fs::read_to_string(layout_path(dir))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+/// Reads the layout file. A file that can't be read as a layout is kept
+/// aside (layout.unreadable-<time>.json) rather than written over. A file
+/// from before Agora knew several devices is copied once to
+/// layout.before-multi-device.json before anything is saved over it.
+fn load_layout(dir: &std::path::Path, fallback: &DeviceDesc) -> Layout {
+    let path = layout_path(dir);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Layout::default().loaded(fallback);
+    };
+    match serde_json::from_str::<Layout>(&text) {
+        Ok(layout) => {
+            if layout.device.is_none() && !text.trim().is_empty() {
+                let keep = dir.join("layout.before-multi-device.json");
+                if !keep.exists() {
+                    let _ = std::fs::copy(&path, keep);
+                }
+            }
+            layout.loaded(fallback)
+        }
+        Err(_) => {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let _ = std::fs::copy(&path, dir.join(format!("layout.unreadable-{secs}.json")));
+            Layout::default().loaded(fallback)
+        }
+    }
 }
 
 fn new_context() -> String {
@@ -1087,7 +1436,7 @@ impl State {
         self.dirty = false;
         let dir = &self.config.data_dir;
         let _ = std::fs::create_dir_all(dir);
-        let Ok(text) = serde_json::to_string_pretty(&self.layout) else {
+        let Ok(text) = serde_json::to_string_pretty(&self.layout.file()) else {
             return;
         };
         // Write to a temp file, keep the previous file as a backup, then swap.
@@ -1198,6 +1547,37 @@ impl State {
     }
 
     fn handle_msg(&mut self, msg: Msg) {
+        // Bring the device the message is about into focus. Input names its
+        // device; the editor's requests go to the device it shows; plugin
+        // messages are routed by their action (see handle_plugin); the rest
+        // go to every device in turn or to none.
+        let target = match &msg {
+            Msg::Key(d, ..) | Msg::Dial(d, ..) | Msg::Swipe(d, _) | Msg::DeviceConnected(d, _) => {
+                Some(d.clone().unwrap_or_else(|| self.ui_dev.clone()))
+            }
+            Msg::HoldTimer(d, ..) | Msg::Steps(d, _) | Msg::AllFacesOn(d) => Some(d.clone()),
+            Msg::ActionResult(c, ..) => self.layout.owner_of(c),
+            Msg::Stats(_)
+            | Msg::Tick
+            | Msg::AllFaces(_)
+            | Msg::Foreground(_)
+            | Msg::Device(_)
+            | Msg::Select(_)
+            | Msg::Devices(_)
+            | Msg::SocketOpen(..)
+            | Msg::SocketText(..)
+            | Msg::SocketClosed(_)
+            | Msg::PluginExited(..)
+            | Msg::Restart(_)
+            | Msg::Shutdown(_) => None,
+            _ => Some(self.ui_dev.clone()),
+        };
+        if let Some(t) = target {
+            if !self.layout.has_device(&t) {
+                return;
+            }
+            self.focus(&t);
+        }
         // A removal can be undone until something else changes the layout.
         match &msg {
             Msg::Clear(_)
@@ -1223,16 +1603,18 @@ impl State {
             Msg::Stats(snapshot) => {
                 if *snapshot != self.stats {
                     self.stats = *snapshot;
-                    let keys: Vec<usize> = self
-                        .layout
-                        .keys()
-                        .iter()
-                        .filter(|(_, i)| i.plugin == BUILTIN && builtin::is_monitor(&i.action))
-                        .map(|(k, _)| *k)
-                        .collect();
-                    for k in keys {
-                        self.redraw(k);
-                    }
+                    self.each_live(|st| {
+                        let keys: Vec<usize> = st
+                            .layout
+                            .keys()
+                            .iter()
+                            .filter(|(_, i)| i.plugin == BUILTIN && builtin::is_monitor(&i.action))
+                            .map(|(k, _)| *k)
+                            .collect();
+                        for k in keys {
+                            st.redraw(k);
+                        }
+                    });
                 }
             }
             Msg::Undo(done) => {
@@ -1241,12 +1623,14 @@ impl State {
                     return;
                 };
                 self.leave_page();
+                let here = self.layout.focus.clone();
                 self.layout = before;
+                self.layout.focus_on(&here);
                 self.layout.fix();
                 self.dirty = true;
                 self.enter_page();
                 self.stop_unused();
-                self.emit(HostEvent::PageChanged);
+                self.page_changed();
                 let _ = done.send(true);
             }
             Msg::SocketOpen(id, tx) => {
@@ -1322,9 +1706,9 @@ impl State {
                 self.dirty = true;
                 let _ = done.send(self.plugins.remove(&uuid).map(|p| p.dir));
             }
-            Msg::Key(key, pressed) => self.on_key(key, pressed),
-            Msg::Tick => self.on_tick(),
-            Msg::HoldTimer(key, seq) => self.on_hold(key, seq),
+            Msg::Key(_, key, pressed) => self.on_key(key, pressed),
+            Msg::Tick => self.each_live(Self::on_tick),
+            Msg::HoldTimer(_, key, seq) => self.on_hold(key, seq),
             Msg::SetHold(key, steps) => {
                 if let Some(inst) = self.layout.keys_mut().get_mut(&key) {
                     inst.hold = steps
@@ -1352,8 +1736,8 @@ impl State {
                     self.flash(key, if ok { Overlay::Ok } else { Overlay::Alert });
                 }
             }
-            Msg::Dial(dial, input) => self.on_dial(dial, input),
-            Msg::Swipe(direction) => {
+            Msg::Dial(_, dial, input) => self.on_dial(dial, input),
+            Msg::Swipe(_, direction) => {
                 let action = if direction < 0 {
                     builtin::NEXT_PAGE
                 } else {
@@ -1361,21 +1745,27 @@ impl State {
                 };
                 self.run_builtin(&Instance::new(BUILTIN, action, json!({})));
             }
-            Msg::DeviceConnected(c) => self.on_device(c),
+            Msg::DeviceConnected(_, c) => {
+                self.on_device(c);
+                self.emit(HostEvent::DevicesChanged);
+            }
             Msg::Device(d) => {
-                if d != self.config.device {
-                    let connected = self.device_connected;
-                    if connected {
-                        self.on_device(false);
+                self.attach(d);
+                self.emit(HostEvent::DevicesChanged);
+            }
+            Msg::Select(id) => {
+                if self.layout.has_device(&id) {
+                    self.ui_dev = id.clone();
+                    self.focus(&id);
+                    if self.live.insert(id) {
+                        self.enter_page();
                     }
-                    self.leave_page();
-                    self.config.device = d;
-                    self.shown.clear();
-                    self.enter_page();
-                    if connected {
-                        self.on_device(true);
-                    }
+                    self.page_changed();
+                    self.emit(HostEvent::DevicesChanged);
                 }
+            }
+            Msg::Devices(done) => {
+                let _ = done.send(self.known_devices());
             }
             Msg::Actions(done) => {
                 let _ = done.send(self.action_list());
@@ -1405,12 +1795,12 @@ impl State {
                     keys,
                 });
             }
-            Msg::Foreground(app) => self.on_foreground(&app),
+            Msg::Foreground(app) => self.each_live(|st| st.on_foreground(&app)),
             Msg::ImportVsd(dirs, done) => {
                 let r = self.import_vsd(&dirs);
                 if r.is_ok() {
                     self.dirty = true;
-                    self.emit(HostEvent::PageChanged);
+                    self.page_changed();
                 }
                 let _ = done.send(r);
             }
@@ -1422,32 +1812,165 @@ impl State {
                         | LayoutOp::AddProfile(_)
                         | LayoutOp::RemoveProfile(_)
                 ) {
-                    self.auto_from = None;
+                    self.rt.auto_from = None;
                 }
                 let r = self.layout_op(op);
                 if r.is_ok() {
                     self.dirty = true;
-                    self.emit(HostEvent::PageChanged);
+                    self.page_changed();
                 }
                 let _ = done.send(r);
             }
-            Msg::Steps(steps) => self.run_steps(steps),
-            Msg::AllFaces(force) => {
-                // Empty keys too: a screen saver or intro may have drawn on
-                // them, and keys that were emptied need blanking.
-                let mut keys: std::collections::BTreeSet<usize> =
-                    self.layout.keys().keys().copied().collect();
-                keys.extend(self.shown.keys().copied());
-                if force {
-                    self.shown.clear();
-                    let d = &self.config.device;
-                    keys.extend(0..d.rows * d.columns);
-                }
-                for k in keys {
-                    self.redraw(k);
-                }
-            }
+            Msg::Steps(_, steps) => self.run_steps(steps),
+            Msg::AllFaces(force) => self.each_live(|st| st.all_faces(force)),
+            Msg::AllFacesOn(_) => self.all_faces(true),
             Msg::Shutdown(_) => unreachable!("handled in run"),
+        }
+    }
+
+    // ---- devices -------------------------------------------------------
+
+    /// Redraws the device in focus: keys whose face changed, or with
+    /// `force` every key. Empty keys too: a screen saver or intro may have
+    /// drawn on them, and keys that were emptied need blanking.
+    fn all_faces(&mut self, force: bool) {
+        let mut keys: BTreeSet<usize> = self.layout.keys().keys().copied().collect();
+        keys.extend(self.rt.shown.keys().copied());
+        if force {
+            self.rt.shown.clear();
+            let d = &self.layout.work_device;
+            keys.extend(0..d.rows * d.columns);
+        }
+        for k in keys {
+            self.redraw(k);
+        }
+    }
+
+    /// Makes `id` the device that layout edits, faces and plugin events
+    /// are about.
+    fn focus(&mut self, id: &str) {
+        if self.layout.focus == id {
+            return;
+        }
+        let rt = std::mem::take(&mut self.rt);
+        self.parked.insert(self.layout.focus.clone(), rt);
+        self.rt = self.parked.remove(id).unwrap_or_default();
+        self.layout.focus_on(id);
+    }
+
+    /// Runs `f` with each live device in focus, then puts focus back.
+    fn each_live(&mut self, mut f: impl FnMut(&mut Self)) {
+        let back = self.layout.focus.clone();
+        let ids: Vec<String> = self.live.iter().cloned().collect();
+        for id in ids {
+            self.focus(&id);
+            f(self);
+        }
+        self.focus(&back);
+    }
+
+    fn page_changed(&self) {
+        self.emit(HostEvent::PageChanged {
+            device: self.layout.focus.clone(),
+        });
+    }
+
+    fn is_connected(&self, id: &str) -> bool {
+        if self.layout.focus == id {
+            self.rt.connected
+        } else {
+            self.parked.get(id).is_some_and(|r| r.connected)
+        }
+    }
+
+    /// Gives a device's layout and state a new id.
+    fn rename_device(&mut self, from: &str, to: &str) {
+        if from == to || self.layout.has_device(to) {
+            return;
+        }
+        self.layout.rename_device(from, to);
+        if let Some(rt) = self.parked.remove(from) {
+            self.parked.insert(to.into(), rt);
+        }
+        if self.live.remove(from) {
+            self.live.insert(to.into());
+        }
+        if self.ui_dev == from {
+            self.ui_dev = to.into();
+        }
+        self.dirty = true;
+    }
+
+    /// A device was plugged in. A device seen before gets its own layout
+    /// back. Otherwise the first device's layout, if it is still known only
+    /// by the model last used (a layout from before Agora knew several
+    /// devices), goes to the first device of that model; anything else
+    /// starts with a fresh layout of its own. Nothing is ever dropped.
+    fn attach(&mut self, d: DeviceDesc) {
+        if d.id.is_empty() {
+            return;
+        }
+        // Plugins knew it by its old id: it appears to them afresh.
+        let mut renamed = false;
+        if !self.layout.has_device(&d.id) && !self.layout.claimed {
+            let first = self.layout.primary.clone();
+            let model = self.layout.first_model.clone().unwrap_or_default();
+            if !self.is_connected(&first) && (model.is_empty() || model == d.model) {
+                self.rename_device(&first, &d.id);
+                renamed = true;
+            }
+        }
+        if !self.layout.claimed && self.layout.primary == d.id {
+            self.layout.claimed = true;
+            self.dirty = true;
+        }
+        self.focus(&d.id);
+        let was_live = self.live.contains(&d.id);
+        if renamed || self.layout.work_device != d {
+            let connected = self.rt.connected;
+            if connected {
+                self.on_device(false);
+            }
+            if was_live {
+                self.leave_page();
+            }
+            self.layout.work_device = d.clone();
+            self.rt.shown.clear();
+            self.dirty = true;
+            self.enter_page();
+            self.live.insert(d.id);
+            if connected {
+                self.on_device(true);
+            }
+        } else if !was_live {
+            self.enter_page();
+            self.live.insert(d.id);
+        }
+    }
+
+    /// Every device with a layout, the first device first.
+    fn known_devices(&self) -> Vec<KnownDevice> {
+        let mut ids = self.layout.device_ids();
+        ids.sort_by_key(|id| (*id != self.layout.primary, id.clone()));
+        ids.iter()
+            .filter_map(|id| {
+                Some(KnownDevice {
+                    device: self.layout.desc_of(id)?.clone(),
+                    connected: self.is_connected(id),
+                    selected: *id == self.ui_dev,
+                })
+            })
+            .collect()
+    }
+
+    /// Focuses the device that owns this action, if one does.
+    fn focus_owner(&mut self, context: &str) -> bool {
+        match self.layout.owner_of(context) {
+            Some(id) => {
+                self.focus(&id);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1472,11 +1995,11 @@ impl State {
     }
 
     fn coords(&self, key: usize) -> Value {
-        let cols = self.config.device.columns.max(1);
+        let cols = self.layout.work_device.columns.max(1);
         match slot(key) {
             Slot::Key => json!({ "column": key % cols, "row": key / cols }),
             // Under the screen keys.
-            Slot::Button => json!({ "column": key - BUTTON_BASE, "row": self.config.device.rows }),
+            Slot::Button => json!({ "column": key - BUTTON_BASE, "row": self.layout.work_device.rows }),
             // Knobs number from the left in a row of their own, as on Elgato's.
             Slot::Dial => json!({ "column": key - DIAL_BASE, "row": 0 }),
         }
@@ -1484,7 +2007,7 @@ impl State {
 
     /// Every key, button and knob this dock has.
     fn all_slots(&self) -> impl Iterator<Item = usize> {
-        let d = &self.config.device;
+        let d = &self.layout.work_device;
         (0..d.rows * d.columns)
             .chain(BUTTON_BASE..BUTTON_BASE + d.buttons)
             .chain(DIAL_BASE..DIAL_BASE + d.dials)
@@ -1492,7 +2015,7 @@ impl State {
 
     /// Whether this dock has the key, button or knob.
     fn slot_exists(&self, key: usize) -> bool {
-        let d = &self.config.device;
+        let d = &self.layout.work_device;
         match slot(key) {
             Slot::Key => key < d.rows * d.columns,
             Slot::Button => key - BUTTON_BASE < d.buttons,
@@ -1553,7 +2076,7 @@ impl State {
             "action": inst.action,
             "event": event,
             "context": inst.context,
-            "device": self.config.device.id,
+            "device": self.layout.work_device.id,
             "payload": payload,
         });
         Some((inst.plugin.clone(), msg))
@@ -1566,12 +2089,17 @@ impl State {
     }
 
     fn device_info(&self) -> Value {
-        json!({
-            "id": self.config.device.id,
-            "name": self.config.device.name,
-            "size": { "columns": self.config.device.columns, "rows": self.config.device.rows },
-            "type": 0,
-        })
+        device_info_of(&self.layout.work_device)
+    }
+
+    /// Every connected device, as plugins see them at registration.
+    fn connected_infos(&self) -> Vec<Value> {
+        self.layout
+            .device_ids()
+            .iter()
+            .filter(|id| self.is_connected(id))
+            .filter_map(|id| self.layout.desc_of(id).map(device_info_of))
+            .collect()
     }
 
     pub(crate) fn info_json(&self, plugin: &str) -> String {
@@ -1599,7 +2127,7 @@ impl State {
                 "highlightColor": "#0078FFFF",
             },
             "devicePixelRatio": 1,
-            "devices": if self.device_connected { json!([self.device_info()]) } else { json!([]) },
+            "devices": self.connected_infos(),
             "plugin": { "uuid": plugin, "version": version },
         })
         .to_string()
@@ -1722,9 +2250,13 @@ impl State {
     }
 
     fn show(&mut self, key: usize, face: Face) {
-        if self.shown.get(&key) != Some(&face) {
-            self.shown.insert(key, face.clone());
-            self.emit(HostEvent::Face { key, face });
+        if self.rt.shown.get(&key) != Some(&face) {
+            self.rt.shown.insert(key, face.clone());
+            self.emit(HostEvent::Face {
+                device: self.layout.focus.clone(),
+                key,
+                face,
+            });
         }
     }
 
@@ -1843,7 +2375,7 @@ impl State {
     // ---- app requests ----------------------------------------------------
 
     fn key_count(&self) -> usize {
-        self.config.device.rows * self.config.device.columns
+        self.layout.work_device.rows * self.layout.work_device.columns
     }
 
     /// Whether an action can go on keys and buttons ("Keypad") or knobs
@@ -1966,21 +2498,25 @@ impl State {
     }
 
     fn clear_plugin_keys(&mut self, uuid: &str) {
-        let keys: Vec<usize> = self
-            .layout
-            .keys()
-            .iter()
-            .filter(|(_, i)| i.plugin == uuid)
-            .map(|(k, _)| *k)
-            .collect();
-        for k in keys {
-            self.clear(k);
-        }
+        self.each_live(|st| {
+            let keys: Vec<usize> = st
+                .layout
+                .keys()
+                .iter()
+                .filter(|(_, i)| i.plugin == uuid)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in keys {
+                st.clear(k);
+            }
+        });
         // Pages not showing: nothing to tell the plugin.
+        let others = self.layout.devices.values_mut().flat_map(|d| d.profiles.iter_mut());
         for g in self
             .layout
             .profiles
             .iter_mut()
+            .chain(others)
             .flat_map(|p| p.pages.iter_mut())
         {
             g.keys.retain(|_, i| i.plugin != uuid);
@@ -2092,7 +2628,7 @@ impl State {
             }
         }
         let free = if slot(key) == Slot::Key {
-            let d = &self.config.device;
+            let d = &self.layout.work_device;
             (0..d.rows * d.columns).find(|k| !target.keys.contains_key(k))
         } else {
             (!target.keys.contains_key(&key)).then_some(key)
@@ -2146,12 +2682,12 @@ impl State {
 
     fn on_key(&mut self, key: usize, pressed: bool) {
         let Some(inst) = self.layout.keys().get(&key).cloned() else {
-            self.down.remove(&key);
+            self.rt.down.remove(&key);
             return;
         };
         if !pressed {
-            let same = self.down.remove(&key).as_deref() == Some(inst.context.as_str());
-            if let Some((_, fired)) = self.holding.remove(&key) {
+            let same = self.rt.down.remove(&key).as_deref() == Some(inst.context.as_str());
+            if let Some((_, fired)) = self.rt.holding.remove(&key) {
                 // Let go before it counted as held: a tap.
                 if same && !fired {
                     self.tap(key, &inst);
@@ -2164,13 +2700,17 @@ impl State {
             }
             return;
         }
-        self.down.insert(key, inst.context.clone());
+        self.rt.down.insert(key, inst.context.clone());
         if inst.plugin == BUILTIN {
             // The bounce goes out first, so a face the action changes
             // (a new page, a toggle) arrives after it and stops it.
-            if let Some(face) = self.shown.get(&key).cloned() {
+            if let Some(face) = self.rt.shown.get(&key).cloned() {
                 if face != Face::default() {
-                    self.emit(HostEvent::Pressed { key, face });
+                    self.emit(HostEvent::Pressed {
+                        device: self.layout.focus.clone(),
+                        key,
+                        face,
+                    });
                 }
             }
         }
@@ -2179,12 +2719,13 @@ impl State {
             // Wait to see whether it's a tap or a hold.
             self.hold_seq += 1;
             let seq = self.hold_seq;
-            self.holding.insert(key, (seq, false));
+            self.rt.holding.insert(key, (seq, false));
             let tx = self.tx.clone();
+            let dev = self.layout.focus.clone();
             let hold_time = self.hold_time;
             tokio::spawn(async move {
                 tokio::time::sleep(hold_time).await;
-                let _ = tx.send(Msg::HoldTimer(key, seq));
+                let _ = tx.send(Msg::HoldTimer(dev, key, seq));
             });
             return;
         }
@@ -2206,14 +2747,14 @@ impl State {
     }
 
     fn on_hold(&mut self, key: usize, seq: u64) {
-        match self.holding.get_mut(&key) {
+        match self.rt.holding.get_mut(&key) {
             Some((s, fired)) if *s == seq && !*fired => *fired = true,
             _ => return,
         }
         let Some(inst) = self.layout.keys().get(&key).cloned() else {
             return;
         };
-        if self.down.get(&key) != Some(&inst.context) {
+        if self.rt.down.get(&key) != Some(&inst.context) {
             return;
         }
         if !inst.hold.is_empty() {
@@ -2260,6 +2801,7 @@ impl State {
                             .to_string();
                         if !sound.is_empty() {
                             self.emit(HostEvent::Run {
+                device: self.layout.focus.clone(),
                                 context: inst.context.clone(),
                                 action: "sound".into(),
                                 settings: json!({ "path": sound, "volume": 100 }),
@@ -2340,7 +2882,7 @@ impl State {
     fn on_dial(&mut self, dial: usize, input: DialInput) {
         let key = DIAL_BASE + dial;
         let Some(inst) = self.layout.keys().get(&key).cloned() else {
-            self.down.remove(&key);
+            self.rt.down.remove(&key);
             return;
         };
         if inst.is_builtin(builtin::DIAL) {
@@ -2367,7 +2909,7 @@ impl State {
         }
         match input {
             DialInput::Turn(ticks) => {
-                let pressed = self.down.contains_key(&key);
+                let pressed = self.rt.down.contains_key(&key);
                 self.send_instance(
                     key,
                     "dialRotate",
@@ -2375,11 +2917,11 @@ impl State {
                 );
             }
             DialInput::Press => {
-                self.down.insert(key, inst.context.clone());
+                self.rt.down.insert(key, inst.context.clone());
                 self.send_instance(key, "dialDown", json!({}));
             }
             DialInput::Release => {
-                if self.down.remove(&key).as_deref() == Some(inst.context.as_str()) {
+                if self.rt.down.remove(&key).as_deref() == Some(inst.context.as_str()) {
                     self.send_instance(key, "dialUp", json!({}));
                 }
             }
@@ -2410,9 +2952,10 @@ impl State {
                     .and_then(Value::as_u64)
                     .unwrap_or(500);
                 let tx = self.tx.clone();
+                let dev = self.layout.focus.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(ms.min(60_000))).await;
-                    let _ = tx.send(Msg::Steps(steps));
+                    let _ = tx.send(Msg::Steps(dev, steps));
                 });
                 return;
             }
@@ -2454,6 +2997,7 @@ impl State {
                 let keys = inst.settings.get(k).cloned().unwrap_or(json!(""));
                 self.flip_toggle(&inst.context);
                 self.emit(HostEvent::Run {
+                device: self.layout.focus.clone(),
                     context: inst.context.clone(),
                     action: "hotkey".into(),
                     settings: json!({ "keys": keys }),
@@ -2511,6 +3055,7 @@ impl State {
         }
         if !def.navigation {
             self.emit(HostEvent::Run {
+                device: self.layout.focus.clone(),
                 context: inst.context.clone(),
                 action: inst.action.clone(),
                 settings: inst.settings.clone(),
@@ -2560,9 +3105,9 @@ impl State {
                     other => other,
                 };
                 if self.layout.profiles.iter().any(|p| p.id == id) {
-                    self.auto_from = None;
+                    self.rt.auto_from = None;
                     self.switch_profile(id);
-                    self.emit(HostEvent::PageChanged);
+                    self.page_changed();
                 }
                 return;
             }
@@ -2570,7 +3115,7 @@ impl State {
         };
         if let Some(page) = target {
             if self.go_to_page(&page) {
-                self.emit(HostEvent::PageChanged);
+                self.page_changed();
             }
         }
     }
@@ -2593,13 +3138,13 @@ impl State {
         for k in keys {
             self.send_instance(k, "willDisappear", json!({}));
         }
-        self.down.clear();
-        self.holding.clear();
+        self.rt.down.clear();
+        self.rt.holding.clear();
     }
 
     /// Draws every key of the page now showing and tells plugins.
     fn enter_page(&mut self) {
-        let d = &self.config.device;
+        let d = &self.layout.work_device;
         let slots: Vec<usize> = (0..self.key_count())
             .chain(BUTTON_BASE..BUTTON_BASE + d.buttons)
             .chain(DIAL_BASE..DIAL_BASE + d.dials)
@@ -2644,7 +3189,7 @@ impl State {
                 .find(|p| p.action(action).is_some())
                 .map(|p| p.uuid.clone())
         };
-        let dev = &self.config.device;
+        let dev = &self.layout.work_device;
         let (cols, rows, buttons) = (dev.columns, dev.rows, dev.buttons);
         let mut read = Vec::new();
         let mut skipped = Vec::new();
@@ -2724,17 +3269,17 @@ impl State {
         match target {
             Some(t) if t == self.layout.active => {}
             Some(t) => {
-                if self.auto_from.is_none() {
-                    self.auto_from = Some(self.layout.active.clone());
+                if self.rt.auto_from.is_none() {
+                    self.rt.auto_from = Some(self.layout.active.clone());
                 }
                 self.switch_profile(&t);
-                self.emit(HostEvent::PageChanged);
+                self.page_changed();
             }
             None => {
-                if let Some(back) = self.auto_from.take() {
+                if let Some(back) = self.rt.auto_from.take() {
                     if self.layout.profiles.iter().any(|p| p.id == back) {
                         self.switch_profile(&back);
-                        self.emit(HostEvent::PageChanged);
+                        self.page_changed();
                     }
                 }
             }
@@ -2939,11 +3484,11 @@ impl State {
     }
 
     fn on_device(&mut self, connected: bool) {
-        self.device_connected = connected;
+        self.rt.connected = connected;
         let ev = if connected {
-            json!({ "event": "deviceDidConnect", "device": self.config.device.id, "deviceInfo": self.device_info() })
+            json!({ "event": "deviceDidConnect", "device": self.layout.work_device.id, "deviceInfo": self.device_info() })
         } else {
-            json!({ "event": "deviceDidDisconnect", "device": self.config.device.id })
+            json!({ "event": "deviceDidDisconnect", "device": self.layout.work_device.id })
         };
         let plugins: Vec<String> = self.plugin_conn.keys().cloned().collect();
         for p in plugins {
@@ -3072,7 +3617,7 @@ impl State {
             let action_info = json!({
                 "action": inst.action,
                 "context": inst.context,
-                "device": self.config.device.id,
+                "device": self.layout.work_device.id,
                 "payload": { "settings": inst.settings, "coordinates": self.coords(key), "controller": self.controller(key), "state": inst.state },
             })
             .to_string();
@@ -3118,6 +3663,7 @@ impl State {
             Role::Pi(context) => {
                 if self.pi_conn.get(&context) == Some(&id) {
                     self.pi_conn.remove(&context);
+                    self.focus_owner(&context);
                     if let Some(key) = self.key_of(&context) {
                         self.send_instance(key, "propertyInspectorDidDisappear", json!({}));
                     }
@@ -3173,22 +3719,25 @@ impl State {
                 }
                 self.plugin_conn.insert(uuid.clone(), id);
                 self.set_status(&uuid, "running");
-                if self.device_connected {
-                    let ev = json!({ "event": "deviceDidConnect", "device": self.config.device.id, "deviceInfo": self.device_info() });
+                for info in self.connected_infos() {
+                    let ev = json!({ "event": "deviceDidConnect", "device": info["id"], "deviceInfo": info });
                     self.send_conn(id, &ev);
                 }
-                let keys: Vec<usize> = self
-                    .layout
-                    .keys()
-                    .iter()
-                    .filter(|(_, i)| i.plugin == uuid)
-                    .map(|(k, _)| *k)
-                    .collect();
-                for k in keys {
-                    self.appear(k);
-                }
+                self.each_live(|st| {
+                    let keys: Vec<usize> = st
+                        .layout
+                        .keys()
+                        .iter()
+                        .filter(|(_, i)| i.plugin == uuid)
+                        .map(|(k, _)| *k)
+                        .collect();
+                    for k in keys {
+                        st.appear(k);
+                    }
+                });
             }
             "registerPropertyInspector" => {
+                self.focus_owner(&uuid);
                 // Agora's own keys have no settings panel on the socket, so
                 // nothing there can change what they run.
                 let Some(key) = self
@@ -3215,6 +3764,17 @@ impl State {
 
     fn handle_plugin(&mut self, uuid: &str, event: &str, msg: &Value) {
         let context = msg.get("context").and_then(Value::as_str).unwrap_or("");
+        // The device the message is about: the one showing the action, or
+        // the one it names (switchToProfile).
+        if !self.focus_owner(context) {
+            let named = msg.get("device").and_then(Value::as_str).unwrap_or("");
+            if self.layout.has_device(named) {
+                self.focus(named);
+            } else {
+                let ui = self.ui_dev.clone();
+                self.focus(&ui);
+            }
+        }
         let payload = msg.get("payload").cloned().unwrap_or(Value::Null);
         // Only let a plugin touch its own keys.
         let key = self
@@ -3273,9 +3833,9 @@ impl State {
                     .map(|p| p.id.clone());
                 match id {
                     Some(id) => {
-                        self.auto_from = None;
+                        self.rt.auto_from = None;
                         self.switch_profile(&id);
-                        self.emit(HostEvent::PageChanged);
+                        self.page_changed();
                     }
                     None => self.log(uuid, format!("No profile called '{wanted}' to switch to")),
                 }
@@ -3371,6 +3931,7 @@ impl State {
     }
 
     fn handle_pi(&mut self, context: &str, event: &str, msg: &Value) {
+        self.focus_owner(context);
         let Some(key) = self.key_of(context) else {
             return;
         };

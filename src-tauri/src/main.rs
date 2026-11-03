@@ -67,6 +67,8 @@ struct Settings {
     intro_seen_version: String,
     /// How long a key must be down to count as held, in milliseconds.
     hold_ms: u64,
+    /// The device the editor shows (its id), when Agora knows several.
+    selected_device: String,
     /// This Agora's version. Not saved; filled in for the window.
     #[serde(skip_deserializing)]
     app_version: String,
@@ -92,6 +94,7 @@ impl Default for Settings {
             intro_video: String::new(),
             intro_seen_version: String::new(),
             hold_ms: 500,
+            selected_device: String::new(),
             app_version: String::new(),
         }
     }
@@ -137,9 +140,31 @@ fn apply_settings(worker: &DockWorker, s: &Settings) {
     }
 }
 
+/// A device that is plugged in and open.
+struct Attached {
+    /// Its id ([`discover::Found::key`]), the same the plugin host uses.
+    id: String,
+    spec: DeviceSpec,
+    worker: DockWorker,
+    path: std::ffi::CString,
+}
+
+/// A device the plugin host keeps a layout for, for the device picker.
+#[derive(Clone, Serialize)]
+struct DeviceLine {
+    id: String,
+    name: String,
+    model: String,
+    connected: bool,
+}
+
 struct Dock {
-    worker: Option<DockWorker>,
-    model: Option<String>,
+    /// Every device plugged in, in the order they connected.
+    docks: Vec<Attached>,
+    /// The device the editor shows; empty until the host says.
+    selected: String,
+    /// Every device with a layout, from the plugin host.
+    known: Vec<DeviceLine>,
     /// The last connection message, for a window that opens later.
     message: String,
     settings: Settings,
@@ -149,8 +174,9 @@ struct Dock {
 impl Default for Dock {
     fn default() -> Self {
         Self {
-            worker: None,
-            model: None,
+            docks: Vec::new(),
+            selected: String::new(),
+            known: Vec::new(),
             message: String::new(),
             settings: Settings::default(),
             settings_path: PathBuf::from("settings.json"),
@@ -159,19 +185,43 @@ impl Default for Dock {
 }
 
 impl Dock {
-    /// The model plugged in, or the last one seen.
-    fn current_spec(&self) -> DeviceSpec {
-        self.worker
-            .as_ref()
-            .map(|w| w.spec.clone())
-            .unwrap_or_else(|| {
-                models::by_id(&self.settings.last_model)
-                    .unwrap_or(&models::M18)
-                    .spec()
-            })
+    fn attached(&self, id: &str) -> Option<&Attached> {
+        self.docks.iter().find(|a| a.id == id)
     }
 
-    /// Changes a setting, saves it, and sends `cmd` if a dock is connected.
+    /// The open device the editor shows.
+    fn shown(&self) -> Option<&Attached> {
+        self.attached(&self.selected)
+    }
+
+    fn worker_for(&self, id: &str) -> Option<&DockWorker> {
+        self.attached(id).map(|a| &a.worker)
+    }
+
+    /// What a device is: the open one, else its model from the host's
+    /// list, else the model last plugged in.
+    fn spec_of(&self, id: &str) -> DeviceSpec {
+        if let Some(a) = self.attached(id) {
+            return a.spec.clone();
+        }
+        let model = self
+            .known
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.model.as_str())
+            .unwrap_or(&self.settings.last_model);
+        models::by_id(model)
+            .or_else(|| models::by_id(&self.settings.last_model))
+            .unwrap_or(&models::M18)
+            .spec()
+    }
+
+    /// The device the editor shows, plugged in or not.
+    fn current_spec(&self) -> DeviceSpec {
+        self.spec_of(&self.selected)
+    }
+
+    /// Changes a setting, saves it, and sends `cmds` to every connected dock.
     fn change(
         &mut self,
         edit: impl FnOnce(&mut Settings),
@@ -179,15 +229,15 @@ impl Dock {
     ) -> Result<(), String> {
         edit(&mut self.settings);
         save_settings(&self.settings_path, &self.settings);
-        match &self.worker {
-            Some(w) => {
-                for c in cmds {
-                    w.send(c);
-                }
-                Ok(())
-            }
-            None => Err("Saved. It goes on the dock when one is connected.".into()),
+        if self.docks.is_empty() {
+            return Err("Saved. It goes on the dock when one is connected.".into());
         }
+        for a in &self.docks {
+            for c in &cmds {
+                a.worker.send(c.clone());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -199,8 +249,8 @@ type Host = Arc<Mutex<Option<HostHandle>>>;
 /// Programs recently in front, newest first, for picking a profile's apps.
 type RecentApps = Arc<Mutex<Vec<String>>>;
 
-/// Latest preview of each key for the window, as PNG data URIs.
-type Previews = Arc<Mutex<HashMap<usize, String>>>;
+/// Latest preview of each key of each device, as PNG data URIs.
+type Previews = Arc<Mutex<HashMap<(String, usize), String>>>;
 
 #[derive(Clone, Serialize)]
 struct Status {
@@ -220,6 +270,10 @@ struct Status {
     /// Tried on a real dock of this model.
     tested: bool,
     message: String,
+    /// The device the editor shows.
+    device_id: String,
+    /// Every device Agora keeps keys for (more than one: a picker shows).
+    devices: Vec<DeviceLine>,
 }
 
 #[derive(Clone, Serialize)]
@@ -249,8 +303,8 @@ struct PluginLine {
 fn status(dock: &Dock, message: impl Into<String>) -> Status {
     let m = dock.current_spec();
     Status {
-        connected: dock.worker.is_some(),
-        model: dock.model.clone(),
+        connected: dock.shown().is_some(),
+        model: dock.shown().map(|a| a.spec.name.clone()),
         model_id: m.id.clone(),
         model_name: m.name.clone(),
         rows: m.rows,
@@ -261,19 +315,68 @@ fn status(dock: &Dock, message: impl Into<String>) -> Status {
         ring_leds: m.ring_leds,
         tested: m.tested,
         message: message.into(),
+        device_id: dock.selected.clone(),
+        devices: dock.known.clone(),
     }
 }
 
 /// The dock as the plugin host describes it to plugins.
-fn device_desc(m: &DeviceSpec) -> DeviceDesc {
+fn device_desc(id: &str, m: &DeviceSpec) -> DeviceDesc {
     DeviceDesc {
-        id: m.id.clone(),
+        id: id.into(),
+        model: m.id.clone(),
         name: m.name.clone(),
         rows: m.rows,
         columns: m.columns,
         buttons: m.buttons,
         dials: m.dials,
+        kind: m.plugin_type,
     }
+}
+
+/// Shows another device's keys in the editor.
+#[tauri::command]
+fn select_device(
+    app: AppHandle,
+    state: State<Shared>,
+    host: State<Host>,
+    id: String,
+) -> Result<Status, String> {
+    with_host(&host, |h| h.select_device(&id))?;
+    let mut dock = state.lock().unwrap();
+    if !dock.known.iter().any(|d| d.id == id) {
+        return Err("Agora doesn't know that device".into());
+    }
+    dock.selected = id.clone();
+    dock.settings.selected_device = id;
+    save_settings(&dock.settings_path, &dock.settings);
+    let st = status(&dock, dock.message.clone());
+    let _ = app.emit("dock-status", st.clone());
+    Ok(st)
+}
+
+/// Asks the host which devices it knows and which one the editor shows.
+fn refresh_known(app: &AppHandle) {
+    let list = match app.state::<Host>().lock().unwrap().as_ref() {
+        Some(h) => h.devices(),
+        None => return,
+    };
+    let shared = app.state::<Shared>();
+    let mut dock = shared.lock().unwrap();
+    dock.known = list
+        .iter()
+        .map(|k| DeviceLine {
+            id: k.device.id.clone(),
+            name: k.device.name.clone(),
+            model: k.device.model.clone(),
+            connected: dock.attached(&k.device.id).is_some(),
+        })
+        .collect();
+    if let Some(sel) = list.iter().find(|k| k.selected) {
+        dock.selected = sel.device.id.clone();
+    }
+    let st = status(&dock, dock.message.clone());
+    let _ = app.emit("dock-status", st);
 }
 
 fn with_host<T>(host: &State<Host>, f: impl FnOnce(&HostHandle) -> T) -> Result<T, String> {
@@ -675,7 +778,7 @@ fn set_screen_saver(state: State<Shared>, mode: String, minutes: u32, gif: Strin
 /// Plays a screen saver on the dock now; the next press stops it.
 #[tauri::command]
 fn preview_screen_saver(app: AppHandle, mode: String, gif: String) -> Result<(), String> {
-    if app.state::<Shared>().lock().unwrap().worker.is_none() {
+    if app.state::<Shared>().lock().unwrap().docks.is_empty() {
         return Err("No dock connected".into());
     }
     if mode == "intro" {
@@ -868,7 +971,7 @@ fn watch_idle(app: AppHandle) {
                 dock.settings.saver.clone(),
                 dock.settings.saver_minutes.max(1),
                 dock.settings.saver_gif.clone(),
-                dock.worker.is_some(),
+                !dock.docks.is_empty(),
             )
         };
         if mode == "off"
@@ -896,14 +999,14 @@ fn run_dock_action(
     if action == "dock-sleep" {
         // Dark until the next press; the saved settings stay as they are.
         DOCK_ASLEEP.store(true, std::sync::atomic::Ordering::Relaxed);
-        return match &dock.worker {
-            Some(w) => {
-                w.send(Command::Brightness(0));
-                w.send(Command::RingOff);
-                Ok(())
-            }
-            None => Err("No dock connected".into()),
-        };
+        if dock.docks.is_empty() {
+            return Err("No dock connected".into());
+        }
+        for a in &dock.docks {
+            a.worker.send(Command::Brightness(0));
+            a.worker.send(Command::RingOff);
+        }
+        return Ok(());
     }
     let result = if action == "brightness" {
         let value = settings
@@ -957,12 +1060,15 @@ fn run_dock_action(
     result
 }
 
+/// The faces of the device the editor shows.
 #[tauri::command]
-fn key_previews(previews: State<Previews>) -> Vec<Preview> {
+fn key_previews(state: State<Shared>, previews: State<Previews>) -> Vec<Preview> {
+    let selected = state.lock().unwrap().selected.clone();
     let map = previews.lock().unwrap();
     map.iter()
-        .map(|(&key, image)| Preview {
-            key,
+        .filter(|((d, _), _)| *d == selected)
+        .map(|((_, key), image)| Preview {
+            key: *key,
             image: Some(image.clone()),
         })
         .collect()
@@ -1013,7 +1119,7 @@ fn find_node() -> Option<PathBuf> {
 fn start_host(
     app: &AppHandle,
     use_vsd_craft: bool,
-    model: &DeviceSpec,
+    first: DeviceDesc,
 ) -> Result<(HostHandle, Receiver<HostEvent>), String> {
     let data = data_dir(app);
     let own = data.join("plugins");
@@ -1027,7 +1133,7 @@ fn start_host(
         plugin_dirs,
         data_dir: data,
         node: find_node(),
-        device: device_desc(model),
+        device: first,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     Ok((HostHandle::start(config, tx)?, rx))
@@ -1043,16 +1149,37 @@ fn restart_host(
     let old = host.lock().unwrap().take();
     drop(old);
     previews.lock().unwrap().clear();
-    let (use_vsd, model) = {
+    let (use_vsd, first, open, wanted) = {
         let dock = shared.lock().unwrap();
-        (dock.settings.use_vsd_craft_plugins, dock.current_spec())
+        // The model last plugged in: a layout from before Agora knew
+        // several devices belongs to the first device of this model.
+        let last = models::by_id(&dock.settings.last_model)
+            .unwrap_or(&models::M18)
+            .spec();
+        let open: Vec<DeviceDesc> = dock
+            .docks
+            .iter()
+            .map(|a| device_desc(&a.id, &a.spec))
+            .collect();
+        (
+            dock.settings.use_vsd_craft_plugins,
+            device_desc(&last.id, &last),
+            open,
+            dock.settings.selected_device.clone(),
+        )
     };
-    let (h, events) = start_host(app, use_vsd, &model)?;
+    let (h, events) = start_host(app, use_vsd, first)?;
     h.set_hold_time(shared.lock().unwrap().settings.hold_ms);
-    if shared.lock().unwrap().worker.is_some() {
-        h.device_connected(true);
+    for d in open {
+        let id = d.id.clone();
+        h.set_device(d);
+        h.device_connected_on(&id, true);
+    }
+    if !wanted.is_empty() {
+        h.select_device(&wanted);
     }
     *host.lock().unwrap() = Some(h);
+    refresh_known(app);
     let (handle, shared, previews) = (app.clone(), shared.clone(), previews.clone());
     std::thread::Builder::new()
         .name("agora-host-events".into())
@@ -1192,8 +1319,9 @@ fn html_plugin_label(plugin: &str) -> String {
 
 /// How many times each key's face has been replaced, so a press bounce
 /// stops as soon as the key gets a newer face.
-fn face_gens() -> &'static Mutex<HashMap<usize, u64>> {
-    static GENS: std::sync::OnceLock<Mutex<HashMap<usize, u64>>> = std::sync::OnceLock::new();
+fn face_gens() -> &'static Mutex<HashMap<(String, usize), u64>> {
+    static GENS: std::sync::OnceLock<Mutex<HashMap<(String, usize), u64>>> =
+        std::sync::OnceLock::new();
     GENS.get_or_init(Default::default)
 }
 
@@ -1203,10 +1331,10 @@ const BOUNCE: [f32; 7] = [0.88, 0.82, 0.86, 0.95, 1.03, 1.01, 1.0];
 const BOUNCE_FRAME: Duration = Duration::from_millis(35);
 
 /// Plays the press bounce on a built-in key, on its own thread.
-fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
+fn press_bounce(shared: &Shared, device: String, key: usize, f: face::Face) {
     let (model, connected) = {
         let dock = shared.lock().unwrap();
-        (dock.current_spec(), dock.worker.is_some())
+        (dock.spec_of(&device), dock.attached(&device).is_some())
     };
     let Some(screen) = model.keys.get(key).copied() else {
         return;
@@ -1214,7 +1342,8 @@ fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
     if !connected || saver::active() {
         return;
     }
-    let start = face_gens().lock().unwrap().get(&key).copied().unwrap_or(0);
+    let slot = (device.clone(), key);
+    let start = face_gens().lock().unwrap().get(&slot).copied().unwrap_or(0);
     let shared = shared.clone();
     let _ = std::thread::Builder::new()
         .name("agora-bounce".into())
@@ -1227,10 +1356,10 @@ fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
                 };
                 {
                     let gens = face_gens().lock().unwrap();
-                    if gens.get(&key).copied().unwrap_or(0) != start {
+                    if gens.get(&slot).copied().unwrap_or(0) != start {
                         return;
                     }
-                    match shared.lock().unwrap().worker.as_ref() {
+                    match shared.lock().unwrap().worker_for(&device) {
                         Some(w) => {
                             w.send(Command::SetKeyImage(key, jpeg));
                         }
@@ -1247,10 +1376,14 @@ fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
 fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Receiver<HostEvent>) {
     for ev in events {
         match ev {
-            HostEvent::Face { key, face: f } => {
-                let (model, connected) = {
+            HostEvent::Face { device, key, face: f } => {
+                let (model, connected, selected) = {
                     let dock = shared.lock().unwrap();
-                    (dock.current_spec(), dock.worker.is_some())
+                    (
+                        dock.spec_of(&device),
+                        dock.attached(&device).is_some(),
+                        dock.selected == device,
+                    )
                 };
                 // Screen keys get their own size; a knob's face goes on its
                 // strip segment (the N4); buttons have no screen.
@@ -1278,11 +1411,11 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
                 {
                     // A new face ends any press bounce still playing on it.
                     let mut gens = face_gens().lock().unwrap();
-                    *gens.entry(key).or_default() += 1;
+                    *gens.entry((device.clone(), key)).or_default() += 1;
                     // While a show plays on the dock, faces wait; it redraws
                     // every key when it ends.
                     if let (Some(cmd), true, false) = (send, connected, saver::active()) {
-                        if let Some(w) = shared.lock().unwrap().worker.as_ref() {
+                        if let Some(w) = shared.lock().unwrap().worker_for(&device) {
                             w.send(cmd);
                         }
                     }
@@ -1292,13 +1425,16 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
                 {
                     let mut map = previews.lock().unwrap();
                     match &image {
-                        Some(uri) => map.insert(key, uri.clone()),
-                        None => map.remove(&key),
+                        Some(uri) => map.insert((device.clone(), key), uri.clone()),
+                        None => map.remove(&(device.clone(), key)),
                     };
                 }
-                let _ = app.emit("key-preview", Preview { key, image });
+                if selected {
+                    let _ = app.emit("key-preview", Preview { key, image });
+                }
             }
-            HostEvent::Pressed { key, face: f } => press_bounce(&shared, key, f),
+            HostEvent::Pressed { device, key, face: f } => press_bounce(&shared, device, key, f),
+            HostEvent::DevicesChanged => refresh_known(&app),
             HostEvent::OpenUrl(url) => open_url(&url),
             HostEvent::StartHtmlPlugin { plugin, url } => {
                 let label = html_plugin_label(&plugin);
@@ -1339,10 +1475,12 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
             HostEvent::Log { plugin, message } => {
                 let _ = app.emit("plugin-log", PluginLine { plugin, message });
             }
-            HostEvent::PageChanged => {
-                let _ = app.emit("page-changed", ());
+            HostEvent::PageChanged { device } => {
+                if shared.lock().unwrap().selected == device {
+                    let _ = app.emit("page-changed", ());
+                }
             }
-            HostEvent::Run { context, action, settings } => {
+            HostEvent::Run { context, action, settings, .. } => {
                 let result = match action.as_str() {
                     "brightness" | "ring" | "dock-sleep" => {
                         run_dock_action(&app, &shared, &action, &settings)
@@ -1379,83 +1517,135 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
     }
 }
 
-/// Keeps a dock connected: finds it, opens it, forwards its events, and
-/// tries again every few seconds after it goes away.
+/// Keeps every dock connected: every few seconds, opens any supported
+/// device that isn't open yet and gives it its own worker and event thread.
+/// A device that goes away is looked for again the same way.
 fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
     let mut last_message = String::new();
-    let mut report = |app: &AppHandle, dock: &mut Dock, msg: String| {
-        dock.message = msg.clone();
-        if msg != last_message {
-            let _ = app.emit("dock-status", status(dock, msg.clone()));
-            last_message = msg;
-        }
-    };
-    let tell_host = |f: &dyn Fn(&HostHandle)| {
-        if let Some(h) = host.lock().unwrap().as_ref() {
-            f(h);
-        }
-    };
+    // Devices that wouldn't open, so a second one that is busy (VSD Craft)
+    // doesn't keep replacing the first one's "connected" every few seconds.
+    let mut failed: Vec<std::ffi::CString> = Vec::new();
     loop {
-        let opened = discover::api().and_then(|api| {
+        let found = discover::api().map(|api| {
             let found = discover::find(&api);
-            let first = found.first().ok_or(agora_device::Error::Disconnected)?;
-            let dock = discover::open(&api, first)?;
-            Ok(DockWorker::start(dock)?)
+            (api, found)
         });
-        match opened {
-            Ok((worker, events)) => {
-                let m = worker.spec.clone();
-                let model = m.name.clone();
-                {
-                    let mut dock = shared.lock().unwrap();
-                    apply_settings(&worker, &dock.settings);
-                    dock.worker = Some(worker);
-                    dock.model = Some(model.clone());
-                    if dock.settings.last_model != m.id {
-                        dock.settings.last_model = m.id.clone();
-                        save_settings(&dock.settings_path, &dock.settings);
+        let mut message = None;
+        match found {
+            Ok((api, found)) => {
+                let (open_ids, open_paths): (Vec<String>, Vec<std::ffi::CString>) = {
+                    let dock = shared.lock().unwrap();
+                    dock.docks
+                        .iter()
+                        .map(|a| (a.id.clone(), a.path.clone()))
+                        .unzip()
+                };
+                if found.is_empty() && open_ids.is_empty() {
+                    message =
+                        Some("No dock found. Plug in your Stream Dock and close VSD Craft.".into());
+                }
+                let mut taken = open_ids;
+                for f in found {
+                    if open_paths.contains(&f.path) {
+                        continue;
                     }
-                    let msg = if m.tested {
-                        format!("{model} connected")
-                    } else {
-                        format!("{model} connected. Agora hasn't been tried on this model yet; tell us what works.")
-                    };
-                    report(&app, &mut dock, msg);
+                    // Two devices with the same serial (or none): number them.
+                    let mut id = f.key();
+                    let mut n = 2;
+                    while taken.contains(&id) {
+                        id = format!("{}-{n}", f.key());
+                        n += 1;
+                    }
+                    match discover::open(&api, &f).and_then(DockWorker::start) {
+                        Ok((worker, events)) => {
+                            failed.retain(|p| *p != f.path);
+                            taken.push(id.clone());
+                            message = Some(attach(&app, &shared, &host, id, f.path, worker, events));
+                        }
+                        Err(e) => {
+                            if taken.is_empty() || !failed.contains(&f.path) {
+                                message = Some(format!("{}: {e}", f.spec.name));
+                            }
+                            if !failed.contains(&f.path) {
+                                failed.push(f.path);
+                            }
+                        }
+                    }
                 }
-                // Put every key's face back on the freshly opened dock.
-                tell_host(&|h| {
-                    h.set_device(device_desc(&m));
-                    h.device_connected(true);
-                    h.redraw_all();
-                });
-                saver::touch();
-                if shared.lock().unwrap().settings.dock_intro {
-                    saver::start(&app, saver::Show::Intro);
-                }
-                forward_events(&app, &host, events);
-                tell_host(&|h| h.device_connected(false));
-                let mut dock = shared.lock().unwrap();
-                dock.worker = None;
-                report(
-                    &app,
-                    &mut dock,
-                    format!("{model} disconnected. Looking for it again..."),
-                );
             }
-            Err(agora_device::Error::Disconnected) => {
-                let mut dock = shared.lock().unwrap();
-                report(
-                    &app,
-                    &mut dock,
-                    "No dock found. Plug in your Stream Dock and close VSD Craft.".into(),
-                );
-            }
-            Err(e) => {
-                let mut dock = shared.lock().unwrap();
-                report(&app, &mut dock, e.to_string());
+            Err(e) => message = Some(e.to_string()),
+        }
+        if let Some(msg) = message {
+            let mut dock = shared.lock().unwrap();
+            dock.message = msg.clone();
+            if msg != last_message {
+                let _ = app.emit("dock-status", status(&dock, msg.clone()));
+                last_message = msg;
             }
         }
         std::thread::sleep(Duration::from_secs(3));
+    }
+}
+
+/// Puts a freshly opened dock to work: settings on it, its layout from the
+/// host, and a thread that forwards its input until it goes away.
+fn attach(
+    app: &AppHandle,
+    shared: &Shared,
+    host: &Host,
+    id: String,
+    path: std::ffi::CString,
+    worker: DockWorker,
+    events: Receiver<Event>,
+) -> String {
+    let m = worker.spec.clone();
+    let model = m.name.clone();
+    {
+        let mut dock = shared.lock().unwrap();
+        apply_settings(&worker, &dock.settings);
+        dock.docks.push(Attached {
+            id: id.clone(),
+            spec: m.clone(),
+            worker,
+            path,
+        });
+        if dock.settings.last_model != m.id {
+            dock.settings.last_model = m.id.clone();
+            save_settings(&dock.settings_path, &dock.settings);
+        }
+    }
+    // Its layout, and every key's face back on it.
+    if let Some(h) = host.lock().unwrap().as_ref() {
+        h.set_device(device_desc(&id, &m));
+        h.device_connected_on(&id, true);
+        h.redraw_device(&id);
+    }
+    saver::touch();
+    if shared.lock().unwrap().settings.dock_intro {
+        saver::start_on(app, saver::Show::Intro, Some(&id));
+    }
+    let (app2, shared2, host2) = (app.clone(), shared.clone(), host.clone());
+    let device = id.clone();
+    let _ = std::thread::Builder::new()
+        .name(format!("agora-dock-{id}"))
+        .spawn(move || {
+            forward_events(&app2, &host2, &device, events);
+            if let Some(h) = host2.lock().unwrap().as_ref() {
+                h.device_connected_on(&device, false);
+            }
+            let mut dock = shared2.lock().unwrap();
+            dock.docks.retain(|a| a.id != device);
+            let msg = format!("{model} disconnected. Looking for it again...");
+            dock.message = msg.clone();
+            let _ = app2.emit("dock-status", status(&dock, msg));
+        });
+    if m.tested {
+        format!("{} connected", m.name)
+    } else {
+        format!(
+            "{} connected. Agora hasn't been tried on this model yet; tell us what works.",
+            m.name
+        )
     }
 }
 
@@ -1466,18 +1656,14 @@ static DOCK_ASLEEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 fn wake_dock(app: &AppHandle) {
     let shared = app.state::<Shared>();
     let dock = shared.lock().unwrap();
-    if let Some(w) = &dock.worker {
-        let s = &dock.settings;
-        w.send(Command::Brightness(s.brightness));
-        if s.ring_on {
-            w.send(Command::Ring(ring_lights(s)));
-            w.send(Command::RingBrightness(s.ring_brightness));
-        }
+    for a in &dock.docks {
+        apply_settings(&a.worker, &dock.settings);
     }
 }
 
-/// Sends dock input to the plugins and the window until the worker stops.
-fn forward_events(app: &AppHandle, host: &Host, events: Receiver<Event>) {
+/// Sends one dock's input to the plugins and the window until its worker
+/// stops.
+fn forward_events(app: &AppHandle, host: &Host, device: &str, events: Receiver<Event>) {
     let mut swallow_release = false;
     for ev in events {
         match ev {
@@ -1516,17 +1702,27 @@ fn forward_events(app: &AppHandle, host: &Host, events: Receiver<Event>) {
                 };
                 if let Some(h) = host.lock().unwrap().as_ref() {
                     match (i.control, i.action) {
-                        (Control::Key(k), Action::Press | Action::Release) => h.key(k, pressed),
-                        (Control::Button(b), Action::Press | Action::Release) => {
-                            h.key(BUTTON_BASE + b, pressed)
+                        (Control::Key(k), Action::Press | Action::Release) => {
+                            h.key_on(device, k, pressed)
                         }
-                        (Control::Dial(d), Action::Turn(t)) => h.dial(d, DialInput::Turn(t.into())),
-                        (Control::Dial(d), Action::Press) => h.dial(d, DialInput::Press),
-                        (Control::Dial(d), Action::Release) => h.dial(d, DialInput::Release),
-                        (Control::Touch(t), Action::Press) => h.dial(t, DialInput::Tap),
-                        (Control::Strip, Action::Swipe(s)) => h.swipe(s.into()),
+                        (Control::Button(b), Action::Press | Action::Release) => {
+                            h.key_on(device, BUTTON_BASE + b, pressed)
+                        }
+                        (Control::Dial(d), Action::Turn(t)) => {
+                            h.dial_on(device, d, DialInput::Turn(t.into()))
+                        }
+                        (Control::Dial(d), Action::Press) => h.dial_on(device, d, DialInput::Press),
+                        (Control::Dial(d), Action::Release) => {
+                            h.dial_on(device, d, DialInput::Release)
+                        }
+                        (Control::Touch(t), Action::Press) => h.dial_on(device, t, DialInput::Tap),
+                        (Control::Strip, Action::Swipe(s)) => h.swipe_on(device, s.into()),
                         _ => {}
                     }
+                }
+                // The window shows presses on the device it shows.
+                if app.state::<Shared>().lock().unwrap().selected != device {
+                    continue;
                 }
                 let _ = app.emit(
                     "dock-input",
@@ -1570,6 +1766,7 @@ fn main() {
         .manage(recent.clone())
         .invoke_handler(tauri::generate_handler![
             dock_status,
+            select_device,
             set_brightness,
             set_ring,
             set_ring_brightness,
@@ -1644,7 +1841,7 @@ fn main() {
                         // to its stock screen by dropping the worker.
                         let stopped = app.state::<Host>().lock().unwrap().take();
                         drop(stopped);
-                        app.state::<Shared>().lock().unwrap().worker = None;
+                        app.state::<Shared>().lock().unwrap().docks.clear();
                         app.exit(0);
                     }
                     _ => {}

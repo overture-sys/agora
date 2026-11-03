@@ -3,80 +3,19 @@
 
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use crate::transport::Transport;
-use crate::{InputEvent, Layout, Model, Result, Rgb, StreamDock};
-
-/// What a dock driver offers. [`StreamDock`] serves every model; tests can
-/// supply their own.
-pub trait Dock: Send {
-    fn model(&self) -> &'static Model;
-    fn open(&mut self) -> Result<()>;
-    fn set_brightness(&mut self, pct: u8) -> Result<()>;
-    fn keepalive(&mut self) -> Result<()>;
-    fn keepalive_interval(&self) -> Duration;
-    fn clear_all(&mut self) -> Result<()>;
-    fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()>;
-    fn set_strip_jpeg(&mut self, segment: usize, jpeg: &[u8]) -> Result<()>;
-    fn set_ring(&mut self, colors: &[Rgb]) -> Result<()>;
-    fn set_ring_brightness(&mut self, pct: u8) -> Result<()>;
-    fn ring_off(&mut self) -> Result<()>;
-    fn ring_reset(&mut self) -> Result<()>;
-    fn close(&mut self) -> Result<()>;
-    fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>>;
-}
-
-impl<T: Transport> Dock for StreamDock<T> {
-    fn model(&self) -> &'static Model {
-        StreamDock::model(self)
-    }
-    fn keepalive_interval(&self) -> Duration {
-        Duration::from_millis(crate::streamdock::KEEPALIVE_MS)
-    }
-    fn open(&mut self) -> Result<()> {
-        StreamDock::open(self)
-    }
-    fn set_brightness(&mut self, pct: u8) -> Result<()> {
-        StreamDock::set_brightness(self, pct)
-    }
-    fn keepalive(&mut self) -> Result<()> {
-        StreamDock::keepalive(self)
-    }
-    fn clear_all(&mut self) -> Result<()> {
-        StreamDock::clear_all(self)
-    }
-    fn set_key_jpeg(&mut self, key: usize, jpeg: &[u8]) -> Result<()> {
-        StreamDock::set_key_jpeg(self, key, jpeg)
-    }
-    fn set_strip_jpeg(&mut self, segment: usize, jpeg: &[u8]) -> Result<()> {
-        StreamDock::set_strip_jpeg(self, segment, jpeg)
-    }
-    fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> {
-        StreamDock::set_ring(self, colors)
-    }
-    fn set_ring_brightness(&mut self, pct: u8) -> Result<()> {
-        StreamDock::set_ring_brightness(self, pct)
-    }
-    fn ring_off(&mut self) -> Result<()> {
-        StreamDock::ring_off(self)
-    }
-    fn ring_reset(&mut self) -> Result<()> {
-        StreamDock::ring_reset(self)
-    }
-    fn close(&mut self) -> Result<()> {
-        StreamDock::close(self)
-    }
-    fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>> {
-        StreamDock::read_event(self, timeout_ms)
-    }
-}
+use crate::dock::Dock;
+use crate::spec::DeviceSpec;
+use crate::{InputEvent, Layout, Result, Rgb};
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    SetKeyJpeg(usize, Vec<u8>),
+    /// A picture for a key, already encoded for the device
+    /// ([`DeviceSpec::encode`]).
+    SetKeyImage(usize, Vec<u8>),
     /// A picture for one segment of the touch strip.
-    SetStripJpeg(usize, Vec<u8>),
+    SetStripImage(usize, Vec<u8>),
     Brightness(u8),
     Ring(Vec<Rgb>),
     /// Ring brightness, 0 to 100.
@@ -102,7 +41,7 @@ pub struct DockWorker {
     tx: Sender<Command>,
     handle: Option<JoinHandle<()>>,
     pub layout: Layout,
-    pub model: &'static Model,
+    pub spec: DeviceSpec,
 }
 
 impl DockWorker {
@@ -110,8 +49,8 @@ impl DockWorker {
     /// receiver until [`Event::Stopped`].
     pub fn start<D: Dock + 'static>(mut dock: D) -> Result<(Self, Receiver<Event>)> {
         dock.open()?;
-        let model = dock.model();
-        let layout = Layout::of(model);
+        let spec = dock.spec().clone();
+        let layout = Layout::of(&spec);
         let (tx, rx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
         let handle = std::thread::Builder::new()
@@ -123,7 +62,7 @@ impl DockWorker {
                 tx,
                 handle: Some(handle),
                 layout,
-                model,
+                spec,
             },
             erx,
         ))
@@ -145,8 +84,9 @@ impl Drop for DockWorker {
 }
 
 fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
+    // Devices that don't need a keepalive never get one.
     let interval = dock.keepalive_interval();
-    let mut next_keepalive = Instant::now() + interval;
+    let mut next_keepalive = interval.map(|i| Instant::now() + i);
     let mut ring_used = false;
 
     let stop = |dock: &mut D, ring_used: bool| {
@@ -173,8 +113,8 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
         let busy = !cmds.is_empty();
         for cmd in coalesce(cmds) {
             let result = match cmd {
-                Command::SetKeyJpeg(k, jpeg) => dock.set_key_jpeg(k, &jpeg),
-                Command::SetStripJpeg(s, jpeg) => dock.set_strip_jpeg(s, &jpeg),
+                Command::SetKeyImage(k, img) => dock.set_key_image(k, &img),
+                Command::SetStripImage(s, img) => dock.set_strip_image(s, &img),
                 Command::Brightness(p) => dock.set_brightness(p),
                 Command::Ring(c) => {
                     ring_used = true;
@@ -203,13 +143,15 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
             }
         }
 
-        if Instant::now() >= next_keepalive {
-            if let Err(e) = dock.keepalive() {
-                let _ = events.send(Event::Error(e.to_string()));
-                let _ = events.send(Event::Stopped);
-                return;
+        if let (Some(due), Some(every)) = (next_keepalive, interval) {
+            if Instant::now() >= due {
+                if let Err(e) = dock.keepalive() {
+                    let _ = events.send(Event::Error(e.to_string()));
+                    let _ = events.send(Event::Stopped);
+                    return;
+                }
+                next_keepalive = Some(Instant::now() + every);
             }
-            next_keepalive = Instant::now() + interval;
         }
 
         // Don't sit waiting for input while pictures are still coming in.
@@ -233,8 +175,8 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
 /// Drops pictures that a later one in the same batch replaces.
 fn coalesce(cmds: Vec<Command>) -> Vec<Command> {
     let target = |c: &Command| match c {
-        Command::SetKeyJpeg(k, _) => Some((0, *k)),
-        Command::SetStripJpeg(s, _) => Some((1, *s)),
+        Command::SetKeyImage(k, _) => Some((0, *k)),
+        Command::SetStripImage(s, _) => Some((1, *s)),
         _ => None,
     };
     let mut out: Vec<Command> = Vec::with_capacity(cmds.len());
@@ -252,25 +194,83 @@ mod tests {
     use super::*;
     use crate::transport::FakeTransport;
     use crate::{models, Control, StreamDock};
+    use std::time::Duration;
 
     #[test]
     fn a_key_drawn_twice_in_a_burst_is_sent_once() {
         let out = coalesce(vec![
-            Command::SetKeyJpeg(0, vec![1]),
+            Command::SetKeyImage(0, vec![1]),
             Command::Brightness(50),
-            Command::SetKeyJpeg(1, vec![2]),
-            Command::SetKeyJpeg(0, vec![3]),
-            Command::SetStripJpeg(0, vec![4]),
+            Command::SetKeyImage(1, vec![2]),
+            Command::SetKeyImage(0, vec![3]),
+            Command::SetStripImage(0, vec![4]),
         ]);
         let keys: Vec<(usize, u8)> = out
             .iter()
             .filter_map(|c| match c {
-                Command::SetKeyJpeg(k, j) => Some((*k, j[0])),
+                Command::SetKeyImage(k, j) => Some((*k, j[0])),
                 _ => None,
             })
             .collect();
         assert_eq!(keys, [(1, 2), (0, 3)]);
         assert_eq!(out.len(), 4);
+    }
+
+    /// A device that needs no keepalive and counts what it is asked to do.
+    struct Quiet {
+        spec: DeviceSpec,
+        log: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl Dock for Quiet {
+        fn spec(&self) -> &DeviceSpec {
+            &self.spec
+        }
+        fn open(&mut self) -> Result<()> {
+            self.log.lock().unwrap().push("open");
+            Ok(())
+        }
+        fn set_brightness(&mut self, _: u8) -> Result<()> {
+            self.log.lock().unwrap().push("brightness");
+            Ok(())
+        }
+        fn keepalive(&mut self) -> Result<()> {
+            self.log.lock().unwrap().push("keepalive");
+            Ok(())
+        }
+        fn clear_all(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn set_key_image(&mut self, _: usize, _: &[u8]) -> Result<()> {
+            self.log.lock().unwrap().push("image");
+            Ok(())
+        }
+        fn close(&mut self) -> Result<()> {
+            self.log.lock().unwrap().push("close");
+            Ok(())
+        }
+        fn read_event(&mut self, _: i32) -> Result<Option<InputEvent>> {
+            std::thread::sleep(Duration::from_millis(5));
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn any_driver_runs_in_the_worker_and_keepalive_is_optional() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dock: Box<dyn Dock> = Box::new(Quiet {
+            spec: models::N3.spec(),
+            log: log.clone(),
+        });
+        let (worker, _events) = DockWorker::start(dock).unwrap();
+        assert_eq!(worker.spec.id, "N3");
+        assert_eq!(worker.layout.dials, 3);
+        worker.send(Command::SetKeyImage(0, vec![1]));
+        worker.send(Command::Brightness(10));
+        std::thread::sleep(Duration::from_millis(100));
+        drop(worker);
+        let log = log.lock().unwrap();
+        assert_eq!(*log, ["open", "image", "brightness", "close"]);
     }
 
     #[test]

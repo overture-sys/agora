@@ -89,7 +89,7 @@ fn connect() -> R<(DockWorker, Receiver<Event>)> {
         "No M18 found. Is it plugged in? Run `agora-m18 list --all` and send the output back.",
     )?;
     println!("Opening {} {:?}", first.model.name, first.product);
-    let dock = discover::open(&api, first).map_err(|e| e.to_string())?;
+    let dock = discover::open_stream_dock(&api, first).map_err(|e| e.to_string())?;
     DockWorker::start(dock).map_err(|e| e.to_string())
 }
 
@@ -102,7 +102,7 @@ fn show_faces(
     for key in 0..worker.layout.key_count() {
         let jpeg =
             keyimage::to_key_jpeg(&face(key), size, orientation).map_err(|e| e.to_string())?;
-        worker.send(Command::SetKeyJpeg(key, jpeg));
+        worker.send(Command::SetKeyImage(key, jpeg));
     }
     Ok(())
 }

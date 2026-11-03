@@ -13,7 +13,7 @@ repository = "https://gitlab.com/overture-group1/agora"
 agora-device = { path = "crates/agora-device" }
 agora-host = { path = "crates/agora-host" }
 hidapi = { version = "2", default-features = false, features = ["windows-native", "linux-static-hidraw"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp"] }
 thiserror = "2"
 
 [profile.release]

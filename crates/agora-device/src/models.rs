@@ -8,6 +8,7 @@
 //! yet tried on real hardware by us; [`Model::tested`] says which is which.
 
 use crate::keyimage::Orientation;
+use crate::spec::{DeviceSpec, Family, ImageFormat, Size};
 
 /// Where one picture goes: the image id the dock wants, and its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +81,35 @@ impl Model {
 
     pub fn matches(&self, vid: u16, pid: u16) -> bool {
         self.usb.contains(&(vid, pid))
+    }
+
+    /// This model as the rest of Agora sees it.
+    pub fn spec(&self) -> DeviceSpec {
+        let size = |s: &Screen| Size {
+            width: s.width,
+            height: s.height,
+        };
+        DeviceSpec {
+            family: Family::StreamDock,
+            id: self.id.into(),
+            name: self.name.into(),
+            rows: self.rows,
+            columns: self.columns,
+            keys: self.keys.iter().map(size).collect(),
+            buttons: self.buttons.len(),
+            dials: self.dials.len(),
+            strip: self
+                .strip
+                .map(|s| s.segments.iter().map(size).collect())
+                .unwrap_or_default(),
+            ring_leds: self.ring_leds,
+            orientation: self.orientation,
+            image_format: ImageFormat::Jpeg,
+            max_image: crate::streamdock::MAX_IMAGE,
+            plugin_type: 0,
+            vsd_device: self.vsd_device.map(str::to_owned),
+            tested: self.tested,
+        }
     }
 }
 
@@ -437,6 +467,20 @@ mod tests {
                 m.name
             );
         }
+    }
+
+    #[test]
+    fn specs_carry_the_model_over() {
+        let s = M18.spec();
+        assert_eq!((s.id.as_str(), s.rows, s.columns), ("M18", 3, 5));
+        assert_eq!((s.buttons, s.dials, s.ring_leds), (3, 0, 24));
+        assert_eq!(s.key_size(), 64);
+        assert!(s.tested && !s.has_strip());
+        assert_eq!(s.vsd_device.as_deref(), Some("VSDM18"));
+        let n4 = N4.spec();
+        assert_eq!(n4.strip.len(), 4);
+        assert_eq!((n4.strip[0].width, n4.strip[0].height), (176, 124));
+        assert_eq!(n4.orientation, Orientation::Rotate180);
     }
 
     #[test]

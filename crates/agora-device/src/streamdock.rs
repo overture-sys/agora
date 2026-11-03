@@ -23,7 +23,11 @@
 
 use std::collections::VecDeque;
 
+use std::time::Duration;
+
+use crate::dock::Dock;
 use crate::models::{Model, Screen};
+use crate::spec::DeviceSpec;
 use crate::transport::Transport;
 use crate::{Action, Control, Error, InputEvent, Layout, Result, Rgb};
 
@@ -37,6 +41,7 @@ const PREFIX: &[u8] = b"CRT\0\0";
 pub struct StreamDock<T: Transport> {
     t: T,
     model: &'static Model,
+    spec: DeviceSpec,
     brightness: u8,
     /// Last SETLB frame (RGB triples), re-sent with the keepalive.
     ring_frame: Option<Vec<u8>>,
@@ -51,6 +56,7 @@ impl<T: Transport> StreamDock<T> {
         Self {
             t,
             model,
+            spec: model.spec(),
             brightness: 80,
             ring_frame: None,
             ring_brightness: None,
@@ -63,7 +69,7 @@ impl<T: Transport> StreamDock<T> {
     }
 
     pub fn layout(&self) -> Layout {
-        Layout::of(self.model)
+        Layout::of(&self.spec)
     }
 
     fn raw(&mut self, payload: &[u8]) -> Result<()> {
@@ -245,6 +251,51 @@ impl<T: Transport> StreamDock<T> {
 
     pub fn into_transport(self) -> T {
         self.t
+    }
+}
+
+impl<T: Transport> Dock for StreamDock<T> {
+    fn spec(&self) -> &DeviceSpec {
+        &self.spec
+    }
+    fn open(&mut self) -> Result<()> {
+        StreamDock::open(self)
+    }
+    fn set_brightness(&mut self, pct: u8) -> Result<()> {
+        StreamDock::set_brightness(self, pct)
+    }
+    fn keepalive_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(KEEPALIVE_MS))
+    }
+    fn keepalive(&mut self) -> Result<()> {
+        StreamDock::keepalive(self)
+    }
+    fn clear_all(&mut self) -> Result<()> {
+        StreamDock::clear_all(self)
+    }
+    fn set_key_image(&mut self, key: usize, image: &[u8]) -> Result<()> {
+        self.set_key_jpeg(key, image)
+    }
+    fn set_strip_image(&mut self, segment: usize, image: &[u8]) -> Result<()> {
+        self.set_strip_jpeg(segment, image)
+    }
+    fn set_ring(&mut self, colors: &[Rgb]) -> Result<()> {
+        StreamDock::set_ring(self, colors)
+    }
+    fn set_ring_brightness(&mut self, pct: u8) -> Result<()> {
+        StreamDock::set_ring_brightness(self, pct)
+    }
+    fn ring_off(&mut self) -> Result<()> {
+        StreamDock::ring_off(self)
+    }
+    fn ring_reset(&mut self) -> Result<()> {
+        StreamDock::ring_reset(self)
+    }
+    fn close(&mut self) -> Result<()> {
+        StreamDock::close(self)
+    }
+    fn read_event(&mut self, timeout_ms: i32) -> Result<Option<InputEvent>> {
+        StreamDock::read_event(self, timeout_ms)
     }
 }
 

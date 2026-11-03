@@ -1,16 +1,27 @@
 //! Agora device layer.
 //!
-//! One driver ([`StreamDock`]) speaks the USB protocol for every model over
-//! a [`Transport`]; [`models`] holds what differs between models.
-//! [`worker::DockWorker`] runs a driver on its own thread,
-//! keeps the dock awake, and turns raw reports into [`InputEvent`]s.
+//! Every driver offers the same [`Dock`] trait and describes its device
+//! with a [`DeviceSpec`], so the app and the plugin host never see which
+//! family a device comes from. Drivers talk through a [`Transport`] (HID
+//! output, input and feature reports).
+//!
+//! Families:
+//! - Stream Dock: one driver ([`StreamDock`]) for every model; [`models`]
+//!   holds what differs between models.
+//! - Stream Deck: not yet; [`spec::Family::StreamDeck`] reserves its place.
+//!
+//! [`worker::DockWorker`] runs any driver on its own thread, keeps the
+//! device awake if it needs that, and turns raw reports into
+//! [`InputEvent`]s.
 //!
 //! Protocol notes come from our own M18 test (2026-10-29) and MIT /
 //! public-domain sources only. No OpenStreamDeck (GPL) code is used.
 
+pub mod dock;
 pub mod glyphs;
 pub mod keyimage;
 pub mod models;
+pub mod spec;
 pub mod streamdock;
 pub mod transport;
 pub mod worker;
@@ -18,7 +29,9 @@ pub mod worker;
 #[cfg(feature = "hid")]
 pub mod discover;
 
+pub use dock::Dock;
 pub use models::Model;
+pub use spec::{DeviceSpec, Family, ImageFormat, Size};
 pub use streamdock::StreamDock;
 pub use transport::Transport;
 
@@ -35,6 +48,8 @@ pub enum Error {
     Image(String),
     #[error("the device was disconnected")]
     Disconnected,
+    #[error("this device doesn't support that")]
+    Unsupported,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -94,15 +109,15 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn of(m: &Model) -> Self {
+    pub fn of(s: &DeviceSpec) -> Self {
         Layout {
-            rows: m.rows,
-            columns: m.columns,
-            key_size: m.key_size(),
-            buttons: m.buttons.len(),
-            dials: m.dials.len(),
-            strip: m.strip.is_some(),
-            ring_leds: m.ring_leds,
+            rows: s.rows,
+            columns: s.columns,
+            key_size: s.key_size(),
+            buttons: s.buttons,
+            dials: s.dials,
+            strip: s.has_strip(),
+            ring_leds: s.ring_leds,
         }
     }
 

@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use agora_device::keyimage;
-use agora_device::models::Model;
+use agora_device::DeviceSpec;
 use agora_device::worker::Command;
 use agora_host::face;
 use image::{imageops, Rgba, RgbaImage};
@@ -63,7 +62,7 @@ pub fn start(app: &AppHandle, show: Show) {
     let shared = app.state::<Shared>().inner().clone();
     let (model, connected) = {
         let dock = shared.lock().unwrap();
-        (dock.current_model(), dock.worker.is_some())
+        (dock.current_spec(), dock.worker.is_some())
     };
     if !connected || model.keys.is_empty() {
         return;
@@ -74,7 +73,7 @@ pub fn start(app: &AppHandle, show: Show) {
     let _ = std::thread::Builder::new()
         .name("agora-show".into())
         .spawn(move || {
-            play(&shared, model, gen, show);
+            play(&shared, &model, gen, show);
             // Ended on its own (the intro): give the keys back.
             if GEN.load(Ordering::SeqCst) == gen {
                 finish(&app);
@@ -104,7 +103,7 @@ fn finish(app: &AppHandle) {
     }
 }
 
-fn play(shared: &Shared, model: &'static Model, gen: u64, show: Show) {
+fn play(shared: &Shared, model: &DeviceSpec, gen: u64, show: Show) {
     let size = model.key_size();
     let (w, h) = (size * model.columns as u32, size * model.rows as u32);
     let grid = Grid { cols: model.columns as u32, rows: model.rows as u32, size };
@@ -136,7 +135,7 @@ fn play(shared: &Shared, model: &'static Model, gen: u64, show: Show) {
                 tile = imageops::resize(&tile, screen.width, screen.height, imageops::FilterType::Triangle);
             }
             let img = image::DynamicImage::ImageRgba8(tile);
-            if let Ok(jpeg) = keyimage::to_jpeg(&img, screen.width, screen.height, model.orientation) {
+            if let Ok(jpeg) = model.encode(&img, *screen) {
                 // Checked under the lock `stop` takes, so no frame can land
                 // after the keys have been given back.
                 let dock = shared.lock().unwrap();
@@ -145,7 +144,7 @@ fn play(shared: &Shared, model: &'static Model, gen: u64, show: Show) {
                 }
                 match dock.worker.as_ref() {
                     Some(wk) => {
-                        wk.send(Command::SetKeyJpeg(i, jpeg));
+                        wk.send(Command::SetKeyImage(i, jpeg));
                     }
                     None => return,
                 }

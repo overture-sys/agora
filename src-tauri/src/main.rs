@@ -16,9 +16,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agora_device::keyimage;
 use agora_device::worker::{Command, DockWorker, Event};
-use agora_device::{discover, models, Action, Control, Model, Rgb};
+use agora_device::{discover, keyimage, models, Action, Control, DeviceSpec, Rgb};
 use agora_host::{
     face, manifest, ActionInfo, Config, DeviceDesc, DialInput, HostEvent, HostHandle, KeyInfo,
     LayoutOp, LayoutView, Look, PageOverview, PluginInfo, Source, BUTTON_BASE, DIAL_BASE,
@@ -161,11 +160,15 @@ impl Default for Dock {
 
 impl Dock {
     /// The model plugged in, or the last one seen.
-    fn current_model(&self) -> &'static Model {
+    fn current_spec(&self) -> DeviceSpec {
         self.worker
             .as_ref()
-            .map(|w| w.model)
-            .unwrap_or_else(|| models::by_id(&self.settings.last_model).unwrap_or(&models::M18))
+            .map(|w| w.spec.clone())
+            .unwrap_or_else(|| {
+                models::by_id(&self.settings.last_model)
+                    .unwrap_or(&models::M18)
+                    .spec()
+            })
     }
 
     /// Changes a setting, saves it, and sends `cmd` if a dock is connected.
@@ -244,17 +247,17 @@ struct PluginLine {
 }
 
 fn status(dock: &Dock, message: impl Into<String>) -> Status {
-    let m = dock.current_model();
+    let m = dock.current_spec();
     Status {
         connected: dock.worker.is_some(),
         model: dock.model.clone(),
-        model_id: m.id.into(),
-        model_name: m.name.into(),
+        model_id: m.id.clone(),
+        model_name: m.name.clone(),
         rows: m.rows,
         columns: m.columns,
-        buttons: m.buttons.len(),
-        dials: m.dials.len(),
-        strip: m.strip.is_some(),
+        buttons: m.buttons,
+        dials: m.dials,
+        strip: m.has_strip(),
         ring_leds: m.ring_leds,
         tested: m.tested,
         message: message.into(),
@@ -262,14 +265,14 @@ fn status(dock: &Dock, message: impl Into<String>) -> Status {
 }
 
 /// The dock as the plugin host describes it to plugins.
-fn device_desc(m: &Model) -> DeviceDesc {
+fn device_desc(m: &DeviceSpec) -> DeviceDesc {
     DeviceDesc {
-        id: m.id.into(),
-        name: m.name.into(),
+        id: m.id.clone(),
+        name: m.name.clone(),
         rows: m.rows,
         columns: m.columns,
-        buttons: m.buttons.len(),
-        dials: m.dials.len(),
+        buttons: m.buttons,
+        dials: m.dials,
     }
 }
 
@@ -578,11 +581,11 @@ fn vsd_profiles_dir() -> Option<PathBuf> {
 fn list_vsd_profiles(state: State<Shared>) -> Vec<agora_host::vsd_import::VsdProfile> {
     // Only profiles made for this model; VSD Craft's names for the others
     // aren't known yet.
-    let Some(device) = state.lock().unwrap().current_model().vsd_device else {
+    let Some(device) = state.lock().unwrap().current_spec().vsd_device else {
         return Vec::new();
     };
     vsd_profiles_dir()
-        .map(|d| agora_host::vsd_import::list(&d, device))
+        .map(|d| agora_host::vsd_import::list(&d, &device))
         .unwrap_or_default()
 }
 
@@ -1010,7 +1013,7 @@ fn find_node() -> Option<PathBuf> {
 fn start_host(
     app: &AppHandle,
     use_vsd_craft: bool,
-    model: &Model,
+    model: &DeviceSpec,
 ) -> Result<(HostHandle, Receiver<HostEvent>), String> {
     let data = data_dir(app);
     let own = data.join("plugins");
@@ -1042,9 +1045,9 @@ fn restart_host(
     previews.lock().unwrap().clear();
     let (use_vsd, model) = {
         let dock = shared.lock().unwrap();
-        (dock.settings.use_vsd_craft_plugins, dock.current_model())
+        (dock.settings.use_vsd_craft_plugins, dock.current_spec())
     };
-    let (h, events) = start_host(app, use_vsd, model)?;
+    let (h, events) = start_host(app, use_vsd, &model)?;
     h.set_hold_time(shared.lock().unwrap().settings.hold_ms);
     if shared.lock().unwrap().worker.is_some() {
         h.device_connected(true);
@@ -1203,7 +1206,7 @@ const BOUNCE_FRAME: Duration = Duration::from_millis(35);
 fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
     let (model, connected) = {
         let dock = shared.lock().unwrap();
-        (dock.current_model(), dock.worker.is_some())
+        (dock.current_spec(), dock.worker.is_some())
     };
     let Some(screen) = model.keys.get(key).copied() else {
         return;
@@ -1219,9 +1222,7 @@ fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
             for zoom in BOUNCE {
                 let begun = Instant::now();
                 let img = face::render_scaled(&f, screen.width, zoom);
-                let Ok(jpeg) =
-                    keyimage::to_jpeg(&img, screen.width, screen.height, model.orientation)
-                else {
+                let Ok(jpeg) = model.encode(&img, screen) else {
                     return;
                 };
                 {
@@ -1231,7 +1232,7 @@ fn press_bounce(shared: &Shared, key: usize, f: face::Face) {
                     }
                     match shared.lock().unwrap().worker.as_ref() {
                         Some(w) => {
-                            w.send(Command::SetKeyJpeg(key, jpeg));
+                            w.send(Command::SetKeyImage(key, jpeg));
                         }
                         None => return,
                     }
@@ -1249,7 +1250,7 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
             HostEvent::Face { key, face: f } => {
                 let (model, connected) = {
                     let dock = shared.lock().unwrap();
-                    (dock.current_model(), dock.worker.is_some())
+                    (dock.current_spec(), dock.worker.is_some())
                 };
                 // Screen keys get their own size; a knob's face goes on its
                 // strip segment (the N4); buttons have no screen.
@@ -1259,19 +1260,20 @@ fn host_events(app: AppHandle, shared: Shared, previews: Previews, events: Recei
                     if screen.width != model.key_size() {
                         img = face::render(&f, screen.width);
                     }
-                    send = keyimage::to_jpeg(&img, screen.width, screen.height, model.orientation)
+                    send = model
+                        .encode(&img, *screen)
                         .ok()
-                        .map(|j| Command::SetKeyJpeg(key, j));
-                } else if let Some(seg) = key
+                        .map(|j| Command::SetKeyImage(key, j));
+                } else if let Some((d, seg)) = key
                     .checked_sub(DIAL_BASE)
-                    .and_then(|d| model.strip.and_then(|s| s.segments.get(d).map(|g| (d, *g))))
+                    .and_then(|d| model.strip.get(d).map(|g| (d, *g)))
                 {
-                    let (d, seg) = seg;
                     img = face::render(&f, seg.height);
                     let wide = keyimage::letterbox(&img, seg.width, seg.height);
-                    send = keyimage::to_jpeg(&wide, seg.width, seg.height, model.orientation)
+                    send = model
+                        .encode(&wide, seg)
                         .ok()
-                        .map(|j| Command::SetStripJpeg(d, j));
+                        .map(|j| Command::SetStripImage(d, j));
                 }
                 {
                     // A new face ends any press bounce still playing on it.
@@ -1402,15 +1404,15 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
         });
         match opened {
             Ok((worker, events)) => {
-                let m = worker.model;
-                let model = m.name.to_string();
+                let m = worker.spec.clone();
+                let model = m.name.clone();
                 {
                     let mut dock = shared.lock().unwrap();
                     apply_settings(&worker, &dock.settings);
                     dock.worker = Some(worker);
                     dock.model = Some(model.clone());
                     if dock.settings.last_model != m.id {
-                        dock.settings.last_model = m.id.into();
+                        dock.settings.last_model = m.id.clone();
                         save_settings(&dock.settings_path, &dock.settings);
                     }
                     let msg = if m.tested {
@@ -1422,7 +1424,7 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
                 }
                 // Put every key's face back on the freshly opened dock.
                 tell_host(&|h| {
-                    h.set_device(device_desc(m));
+                    h.set_device(device_desc(&m));
                     h.device_connected(true);
                     h.redraw_all();
                 });

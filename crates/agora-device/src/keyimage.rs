@@ -1,11 +1,13 @@
 //! Turns pictures into key-ready JPEGs, and draws simple test faces.
 
+use image::codecs::bmp::BmpEncoder;
 use image::codecs::jpeg::JpegEncoder;
 use image::{Rgb, RgbImage};
 
 pub use image::imageops::FilterType;
 pub use image::DynamicImage;
 
+use crate::spec::ImageFormat;
 use crate::{glyphs, Error, Result};
 
 /// How a model's screen is turned relative to the picture we send.
@@ -74,18 +76,54 @@ pub fn to_jpeg(
     height: u32,
     orientation: Orientation,
 ) -> Result<Vec<u8>> {
+    encode(
+        img,
+        width,
+        height,
+        orientation,
+        ImageFormat::Jpeg,
+        crate::streamdock::MAX_IMAGE,
+    )
+}
+
+/// Scales `img` to fill `width` x `height`, turns it, and encodes it in
+/// `format`. JPEGs lose quality until they fit in `max_bytes`.
+pub fn encode(
+    img: &DynamicImage,
+    width: u32,
+    height: u32,
+    orientation: Orientation,
+    format: ImageFormat,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
     let filled = img.resize_to_fill(width, height, FilterType::Lanczos3);
     let turned = orientation.apply(filled).to_rgb8();
-    let mut quality = 90;
-    loop {
-        let mut out = Vec::new();
-        JpegEncoder::new_with_quality(&mut out, quality)
-            .encode_image(&turned)
-            .map_err(|e| Error::Image(e.to_string()))?;
-        if out.len() <= crate::streamdock::MAX_IMAGE || quality <= 30 {
-            return Ok(out);
+    match format {
+        ImageFormat::Jpeg => {
+            let mut quality = 90;
+            loop {
+                let mut out = Vec::new();
+                JpegEncoder::new_with_quality(&mut out, quality)
+                    .encode_image(&turned)
+                    .map_err(|e| Error::Image(e.to_string()))?;
+                if out.len() <= max_bytes || quality <= 30 {
+                    return Ok(out);
+                }
+                quality -= 15;
+            }
         }
-        quality -= 15;
+        ImageFormat::Bmp => {
+            let mut out = Vec::new();
+            BmpEncoder::new(&mut out)
+                .encode(
+                    turned.as_raw(),
+                    turned.width(),
+                    turned.height(),
+                    image::ExtendedColorType::Rgb8,
+                )
+                .map_err(|e| Error::Image(e.to_string()))?;
+            Ok(out)
+        }
     }
 }
 
@@ -176,6 +214,15 @@ mod tests {
         let jpeg = to_key_jpeg(&wide, 64, Orientation::Rotate90).unwrap();
         let back = image::load_from_memory(&jpeg).unwrap();
         assert_eq!((back.width(), back.height()), (64, 64));
+    }
+
+    #[test]
+    fn bmp_pictures_have_the_screen_size() {
+        let face = text_face(64, [0, 0, 0], [255, 255, 255], &["A"]);
+        let bmp = encode(&face, 72, 72, Orientation::Rotate180, ImageFormat::Bmp, 0).unwrap();
+        assert_eq!(&bmp[..2], b"BM");
+        let back = image::load_from_memory(&bmp).unwrap();
+        assert_eq!((back.width(), back.height()), (72, 72));
     }
 
     #[test]

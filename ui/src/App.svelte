@@ -360,9 +360,39 @@
 
   /// An Open key without its own icon takes the program's.
   async function useAppIcon(path: string) {
-    if (!info || info.action !== "open" || info.look.icon || !/\.(exe|lnk)$/i.test(path.trim().replace(/"/g, ""))) return;
+    const p = path.trim().replace(/"/g, "");
+    if (!info || info.action !== "open" || info.look.icon || !(/\.(exe|lnk)$/i.test(p) || /^shell:/i.test(p))) return;
     const icon = await invoke<string | null>("app_icon", { path }).catch(() => null);
     if (icon && info && !info.look.icon) saveLook({ icon });
+  }
+
+  // The "Installed app" picker on Open keys: Start > All apps, with icons.
+  type InstalledApp = { name: string; path: string; icon: string | null };
+  let appPicker = $state(false);
+  let installedApps = $state<InstalledApp[] | null>(null);
+  let appSearch = $state("");
+  async function loadInstalledApps(refresh = false) {
+    if (refresh) installedApps = null;
+    installedApps = await invoke<InstalledApp[]>("installed_apps", { refresh }).catch(() => []);
+  }
+  function toggleAppPicker() {
+    appPicker = !appPicker;
+    appSearch = "";
+    if (appPicker && installedApps === null) loadInstalledApps();
+  }
+  function chooseInstalledApp(app: InstalledApp, save: Save, autoIcon: boolean) {
+    save({ path: app.path, args: "" });
+    if (autoIcon) useAppIcon(app.path);
+    appPicker = false;
+  }
+  const shownApps = $derived.by(() => {
+    const q = appSearch.trim().toLowerCase();
+    return (installedApps ?? []).filter((a) => !q || a.name.toLowerCase().includes(q));
+  });
+  /// An Open key's path as a person reads it: the app's name for
+  /// installed apps, otherwise the path itself.
+  function appName(path: string) {
+    return installedApps?.find((a) => a.path.toLowerCase() === path.trim().toLowerCase())?.name ?? null;
   }
 
   async function pickFile(title: string, name: string, extensions: string[]) {
@@ -1332,8 +1362,35 @@
     {:else if action === "open"}
       <label>App, file or folder
         <span class="row grow"><input value={st.path ?? ""} placeholder="C:\Program Files\..." onchange={(e) => { save({ path: e.currentTarget.value }); if (st === info?.settings) useAppIcon(e.currentTarget.value); }} />
-          <button onclick={() => pickProgram(save, st === info?.settings)}>File…</button><button onclick={() => pickFolderPath(save)}>Folder…</button></span>
+          <button onclick={toggleAppPicker} aria-expanded={appPicker} aria-controls="app-picker">Installed app…</button><button onclick={() => pickProgram(save, st === info?.settings)}>File…</button><button onclick={() => pickFolderPath(save)}>Folder…</button></span>
       </label>
+      {#if /^shell:/i.test((st.path ?? "").trim()) && appName(st.path)}<p class="muted small">Opens {appName(st.path)}, as from the Start menu.</p>{/if}
+      {#if appPicker}
+        <div class="app-picker" id="app-picker" role="group" aria-label="Installed apps">
+          <span class="row grow">
+            <input type="search" placeholder="Search installed apps" aria-label="Search installed apps" bind:value={appSearch}
+              onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); appPicker = false; } else if (e.key === "Enter" && shownApps.length) chooseInstalledApp(shownApps[0], save, st === info?.settings); }} />
+            <button class="small" onclick={() => loadInstalledApps(true)} disabled={installedApps === null}>Refresh</button>
+          </span>
+          {#if installedApps === null}
+            <p class="muted small">Looking for installed apps…</p>
+          {:else if installedApps.length === 0}
+            <p class="muted small">Couldn't read the list of installed apps. Use File… instead.</p>
+          {:else if shownApps.length === 0}
+            <p class="muted small">No app called “{appSearch}”.</p>
+          {:else}
+            <ul class="app-list">
+              {#each shownApps as app (app.path)}
+                <li><button class="app-row" class:current={(st.path ?? "").toLowerCase() === app.path.toLowerCase()} onclick={() => chooseInstalledApp(app, save, st === info?.settings)} title={app.path}>
+                  {#if app.icon}<img src={app.icon} alt="" width="24" height="24" />{:else}<span class="app-noicon" aria-hidden="true"></span>{/if}
+                  <span>{app.name}</span>
+                </button></li>
+              {/each}
+            </ul>
+            <p class="muted small">{shownApps.length} of {installedApps.length} apps, from Start › All apps.</p>
+          {/if}
+        </div>
+      {/if}
       <label>Arguments <span class="muted small">(programs only)</span><input value={st.args ?? ""} onchange={(e) => save({ args: e.currentTarget.value })} /></label>
     {:else if action === "website"}
       <label>Web address <input value={st.url ?? ""} placeholder="https://" onchange={(e) => save({ url: e.currentTarget.value })} /></label>

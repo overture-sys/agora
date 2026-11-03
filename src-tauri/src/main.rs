@@ -2,6 +2,7 @@
 // host. Keys show what their plugins draw; presses go to the plugins.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod apps;
 mod extra;
 mod foreground;
 mod more;
@@ -740,8 +741,32 @@ fn audio_apps() -> Vec<String> {
 /// A program's own icon as a PNG data URI, for an Open key.
 #[tauri::command]
 fn app_icon(path: String) -> Option<String> {
-    let img = more::win::app_icon(path.trim().trim_matches('"'))?;
+    let path = path.trim().trim_matches('"');
+    let img = if apps::is_shell_path(path) {
+        apps::icon(path, 128)?
+    } else {
+        more::win::app_icon(path)?
+    };
     png_data_uri(&image::DynamicImage::ImageRgba8(img))
+}
+
+/// The apps installed on this PC (Start > All apps), for an Open key's
+/// "Installed app" picker. Kept after the first look; `refresh` looks again.
+#[tauri::command]
+async fn installed_apps(refresh: bool) -> Vec<apps::App> {
+    static CACHE: Mutex<Option<Vec<apps::App>>> = Mutex::new(None);
+    if !refresh {
+        if let Some(list) = CACHE.lock().unwrap().clone() {
+            return list;
+        }
+    }
+    let list = tauri::async_runtime::spawn_blocking(|| {
+        apps::list(|img| png_data_uri(&image::DynamicImage::ImageRgba8(img)))
+    })
+    .await
+    .unwrap_or_default();
+    *CACHE.lock().unwrap() = Some(list.clone());
+    list
 }
 
 /// The snippets of the Snippets key last pressed, for its pop-up.
@@ -1592,6 +1617,7 @@ fn main() {
             audio_outputs,
             audio_apps,
             app_icon,
+            installed_apps,
             snippet_list,
             pick_snippet
         ])

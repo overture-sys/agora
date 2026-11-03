@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.8 beta (2026-11-03)
+
+- New: Open keys can pick an installed app. "Installed app…" lists everything under Start › All apps, desktop programs and Store apps alike, with their icons and a search box. The key opens the app the way the Start menu does, and takes the app's icon if it has none of its own. File… and Folder… still work as before.
+
 ## 0.7.7 beta (2026-11-03)
 
 Security review of 0.7.6.

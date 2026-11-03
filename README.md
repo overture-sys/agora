@@ -6,7 +6,7 @@ A free, open-source (MIT) app for VSDinside / Mirabox Stream Dock devices: a rep
 
 > **Beta. Tested on the Stream Dock M18 only.** The other models below are built from public notes and haven't been tried on real hardware yet. If you have one, please try it and open an issue saying what works and what doesn't.
 >
-> Not made by or affiliated with VSDinside, Mirabox or HotSpot.
+> Not made by or affiliated with VSDinside, Mirabox, HotSpot, Elgato or Corsair.
 
 If Agora is useful to you, you can support it on [Ko-fi](https://ko-fi.com/overturesys).
 
@@ -19,6 +19,7 @@ Your keys, profiles and settings live in `%APPDATA%\Agora` and are kept when you
 
 ## What it does
 - **Docks:** Stream Dock M18 (tested). Also M18 V3, 293V3, 293S (three versions), N3, N4 / N4 Pro and XL (untested).
+- **Also works with Elgato Stream Deck (early, untested):** Mini, Mini MK.2, Stream Deck (original and MK.2), XL and the Neo's keys. Quit the Elgato Stream Deck app first. Several devices can be plugged in at once; each keeps its own profiles.
 - **Keys:** drag an action onto a key, button or knob. Your own title, title position, colour and icon on any key.
 - **Profiles, pages and folders.** A profile can follow an app: it comes up while that app is in front.
 - **Agora's own actions:** open an app, file or folder; website; hotkey (press the keys to record them); type text; media keys; quick controls (sleep, lock, show desktop, screen off, microphone mute, switch screens); quick tools (Calculator, emoji panel, Task Manager, search and more); close window; mouse click, scroll and move; browser back, forward, refresh and tabs; saved passwords (kept in Windows Credential Manager); soundboard; UDP network messages; web requests (Home Assistant, webhooks); run a PowerShell command and show its output; snippets picker; window tools (next screen, snap, maximise, keep on top); sound output switching and per-app volume; hotkey switch; dock brightness, dock sleep and the light ring; next, previous or go to page, page indicator; switch profile (or the next or previous one); folder.
@@ -75,7 +76,9 @@ Ship `agora.exe` with `WebView2Loader.dll` from the same folder. To make the ins
 `makensis -DVERSION=<version> -DSRC=<that folder> installer/agora.nsi`.
 
 ## Sources
-Device protocol from our own M18 tests plus MIT / public-domain notes: bidoofgoo/streamdock-m18 (PROTOCOL.md), bitfocus/companion-surface-mirabox-stream-dock (model tables for the other docks), stevemurr/streamdock. Plugin protocol from the Stream Dock SDK (sdk.key123.vip). No OpenStreamDeck (GPL) code is used.
+Device protocol from our own M18 tests plus MIT / public-domain notes: bidoofgoo/streamdock-m18 (PROTOCOL.md), bitfocus/companion-surface-mirabox-stream-dock (model tables for the other docks), stevemurr/streamdock. Plugin protocol from the Stream Dock SDK (sdk.key123.vip). No OpenStreamDeck or OpenDeck (GPL) code is used.
+
+Stream Deck support uses the [elgato-streamdeck](https://crates.io/crates/elgato-streamdeck) crate (version 0.14.0, MPL-2.0, source at https://github.com/OpenActionAPI/rust-elgato-streamdeck), unchanged. Its files stay under the MPL-2.0 (https://mozilla.org/MPL/2.0/); the rest of Agora is MIT.
 
 ## License
 MIT. Copyright (c) 2026 overture-sys. Built by overture-sys with Claude.

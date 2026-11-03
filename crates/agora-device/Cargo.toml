@@ -1,6 +1,6 @@
 [package]
 name = "agora-device"
-description = "Device layer for Agora: USB drivers for Stream Dock hardware"
+description = "Device layer for Agora: USB drivers for Stream Dock and Stream Deck hardware"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,9 +10,10 @@ repository.workspace = true
 [features]
 default = ["hid"]
 # Real USB access. Off for pure unit tests of the protocol code.
-hid = ["dep:hidapi"]
+hid = ["dep:hidapi", "dep:elgato-streamdeck"]
 
 [dependencies]
 hidapi = { workspace = true, optional = true }
+elgato-streamdeck = { workspace = true, optional = true }
 image.workspace = true
 thiserror.workspace = true

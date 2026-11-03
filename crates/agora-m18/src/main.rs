@@ -71,7 +71,7 @@ fn list(args: &[String]) -> R<()> {
         println!("No M18 found (5548:1000, usage page 0xFFA0).");
     }
     for f in &found {
-        println!("{}  {:?}  serial {:?}", f.model.name, f.product, f.serial);
+        println!("{}  {:?}  serial {:?}", f.spec.name, f.product, f.serial);
     }
     if flag(args, "--all") {
         println!("\nVendor HID devices:");
@@ -88,7 +88,7 @@ fn connect() -> R<(DockWorker, Receiver<Event>)> {
     let first = found.first().ok_or(
         "No M18 found. Is it plugged in? Run `agora-m18 list --all` and send the output back.",
     )?;
-    println!("Opening {} {:?}", first.model.name, first.product);
+    println!("Opening {} {:?}", first.spec.name, first.product);
     let dock = discover::open_stream_dock(&api, first).map_err(|e| e.to_string())?;
     DockWorker::start(dock).map_err(|e| e.to_string())
 }

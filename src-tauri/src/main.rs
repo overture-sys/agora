@@ -210,10 +210,9 @@ impl Dock {
             .find(|d| d.id == id)
             .map(|d| d.model.as_str())
             .unwrap_or(&self.settings.last_model);
-        models::by_id(model)
-            .or_else(|| models::by_id(&self.settings.last_model))
-            .unwrap_or(&models::M18)
-            .spec()
+        discover::spec_by_id(model)
+            .or_else(|| discover::spec_by_id(&self.settings.last_model))
+            .unwrap_or_else(|| models::M18.spec())
     }
 
     /// The device the editor shows, plugged in or not.
@@ -1155,9 +1154,8 @@ fn restart_host(
         let dock = shared.lock().unwrap();
         // The model last plugged in: a layout from before Agora knew
         // several devices belongs to the first device of this model.
-        let last = models::by_id(&dock.settings.last_model)
-            .unwrap_or(&models::M18)
-            .spec();
+        let last = discover::spec_by_id(&dock.settings.last_model)
+            .unwrap_or_else(|| models::M18.spec());
         let open: Vec<DeviceDesc> = dock
             .docks
             .iter()
@@ -1544,7 +1542,7 @@ fn connection_loop(app: AppHandle, shared: Shared, host: Host) {
                 };
                 if found.is_empty() && open_ids.is_empty() {
                     message =
-                        Some("No dock found. Plug in your Stream Dock and close VSD Craft.".into());
+                        Some("No device found. Plug in your Stream Dock or Stream Deck, and close VSD Craft or the Elgato app.".into());
                 }
                 let mut taken = open_ids;
                 for f in found {

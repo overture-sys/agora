@@ -22,6 +22,9 @@ pub enum Orientation {
     Rotate270,
     FlipH,
     FlipV,
+    /// Turned a quarter clockwise, then mirrored left to right (rows become
+    /// columns). Stream Deck Minis want this.
+    Transpose,
 }
 
 impl Orientation {
@@ -42,11 +45,15 @@ impl Orientation {
             Orientation::Rotate270 => "rotate270",
             Orientation::FlipH => "fliph",
             Orientation::FlipV => "flipv",
+            Orientation::Transpose => "transpose",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|o| o.name() == s)
+        Self::ALL
+            .into_iter()
+            .chain([Orientation::Transpose])
+            .find(|o| o.name() == s)
     }
 
     fn apply(self, img: DynamicImage) -> DynamicImage {
@@ -57,6 +64,7 @@ impl Orientation {
             Orientation::Rotate270 => img.rotate270(),
             Orientation::FlipH => img.fliph(),
             Orientation::FlipV => img.flipv(),
+            Orientation::Transpose => img.rotate90().fliph(),
         }
     }
 }

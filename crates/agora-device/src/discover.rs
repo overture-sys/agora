@@ -3,9 +3,12 @@
 
 use hidapi::{DeviceInfo, HidApi};
 
+use elgato_streamdeck::info::Kind;
+
 use crate::dock::Dock;
 use crate::models::{self, Model};
 use crate::spec::{DeviceSpec, Family};
+use crate::streamdeck::{self, ElgatoDeck};
 use crate::transport::HidTransport;
 use crate::{Error, Result, StreamDock};
 
@@ -15,7 +18,9 @@ pub struct Found {
     pub family: Family,
     pub spec: DeviceSpec,
     /// The Stream Dock table entry, for Stream Docks.
-    pub model: &'static Model,
+    pub model: Option<&'static Model>,
+    /// The Stream Deck model, for Stream Decks.
+    pub deck: Option<Kind>,
     pub path: std::ffi::CString,
     pub serial: Option<String>,
     pub product: Option<String>,
@@ -59,8 +64,38 @@ fn is_vendor_interface(d: &DeviceInfo) -> bool {
 
 /// Lists supported devices, one entry per device.
 pub fn find(api: &HidApi) -> Vec<Found> {
-    // Only the Stream Dock family has a driver so far.
-    find_stream_docks(api)
+    let mut out = find_stream_docks(api);
+    out.extend(find_stream_decks(api));
+    out
+}
+
+fn find_stream_decks(api: &HidApi) -> Vec<Found> {
+    let mut out: Vec<Found> = Vec::new();
+    for d in api.device_list() {
+        let Some(kind) = Kind::from_vid_pid(d.vendor_id(), d.product_id()) else {
+            continue;
+        };
+        if !streamdeck::supported(kind) {
+            continue;
+        }
+        let serial = d.serial_number().map(str::to_owned);
+        if out
+            .iter()
+            .any(|f| f.deck == Some(kind) && f.serial == serial)
+        {
+            continue;
+        }
+        out.push(Found {
+            family: Family::StreamDeck,
+            spec: streamdeck::spec(kind),
+            model: None,
+            deck: Some(kind),
+            path: d.path().to_owned(),
+            serial,
+            product: d.product_string().map(str::to_owned),
+        });
+    }
+    out
 }
 
 fn find_stream_docks(api: &HidApi) -> Vec<Found> {
@@ -84,14 +119,15 @@ fn find_stream_docks(api: &HidApi) -> Vec<Found> {
         // Some systems list one interface more than once.
         if out
             .iter()
-            .any(|f| std::ptr::eq(f.model, model) && f.serial == serial && serial.is_some())
+            .any(|f| f.model.is_some_and(|m| std::ptr::eq(m, model)) && f.serial == serial && serial.is_some())
         {
             continue;
         }
         out.push(Found {
             family: Family::StreamDock,
             spec: model.spec(),
-            model,
+            model: Some(model),
+            deck: None,
             path: d.path().to_owned(),
             serial,
             product: d.product_string().map(str::to_owned),
@@ -107,6 +143,7 @@ pub fn describe_all(api: &HidApi, only_vendor_pages: bool) -> Vec<String> {
             !only_vendor_pages
                 || d.usage_page() >= 0xFF00
                 || models::by_usb(d.vendor_id(), d.product_id()).is_some()
+                || Kind::from_vid_pid(d.vendor_id(), d.product_id()).is_some()
         })
         .map(|d| {
             format!(
@@ -119,7 +156,12 @@ pub fn describe_all(api: &HidApi, only_vendor_pages: bool) -> Vec<String> {
                 d.manufacturer_string().unwrap_or(""),
                 d.product_string().unwrap_or(""),
                 models::by_usb(d.vendor_id(), d.product_id())
-                    .map(|m| format!("  [{}]", m.name))
+                    .map(|m| m.name.to_string())
+                    .or_else(|| {
+                        Kind::from_vid_pid(d.vendor_id(), d.product_id())
+                            .map(|k| streamdeck::spec(k).name)
+                    })
+                    .map(|n| format!("  [{n}]"))
                     .unwrap_or_default(),
             )
         })
@@ -131,21 +173,36 @@ pub fn describe_all(api: &HidApi, only_vendor_pages: bool) -> Vec<String> {
 pub fn open(api: &HidApi, found: &Found) -> Result<Box<dyn Dock>> {
     match found.family {
         Family::StreamDock => Ok(Box::new(open_stream_dock(api, found)?)),
-        Family::StreamDeck => Err(Error::Unsupported),
+        Family::StreamDeck => {
+            let kind = found.deck.ok_or(Error::Unsupported)?;
+            // The crate opens a deck by its serial number.
+            let serial = found.serial.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+                Error::Usb(format!("{} has no serial number, so it can't be opened", found.spec.name))
+            })?;
+            Ok(Box::new(ElgatoDeck::connect(api, kind, serial)?))
+        }
     }
 }
 
 /// Opens a found Stream Dock with its own driver type.
 pub fn open_stream_dock(api: &HidApi, found: &Found) -> Result<StreamDock<HidTransport>> {
+    let model = found.model.ok_or(Error::Unsupported)?;
     let dev = api.open_path(&found.path).map_err(|e| {
         Error::Usb(format!(
             "{e}. Is VSD Craft (Stream Dock) still running? Close it and try again."
         ))
     })?;
     Ok(StreamDock::new(
-        found.model,
-        HidTransport::new(dev, found.model.packet),
+        model,
+        HidTransport::new(dev, model.packet),
     ))
+}
+
+/// A model of either family by its short id ("M18", "SDMINI").
+pub fn spec_by_id(id: &str) -> Option<DeviceSpec> {
+    models::by_id(id)
+        .map(Model::spec)
+        .or_else(|| streamdeck::by_id(id).map(streamdeck::spec))
 }
 
 pub fn api() -> Result<HidApi> {

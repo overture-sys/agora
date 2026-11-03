@@ -8,14 +8,17 @@
 //! Families:
 //! - Stream Dock: one driver ([`StreamDock`]) for every model; [`models`]
 //!   holds what differs between models.
-//! - Stream Deck: not yet; [`spec::Family::StreamDeck`] reserves its place.
+//! - Stream Deck: `streamdeck::ElgatoDeck`, on top of the
+//!   `elgato-streamdeck` crate (MPL-2.0), used unchanged. Keys-only models
+//!   for now.
 //!
 //! [`worker::DockWorker`] runs any driver on its own thread, keeps the
 //! device awake if it needs that, and turns raw reports into
 //! [`InputEvent`]s.
 //!
-//! Protocol notes come from our own M18 test (2026-10-29) and MIT /
-//! public-domain sources only. No OpenStreamDeck (GPL) code is used.
+//! Stream Dock protocol notes come from our own M18 test (2026-10-29) and
+//! MIT / public-domain sources only. No OpenStreamDeck or OpenDeck (GPL)
+//! code is used.
 
 pub mod dock;
 pub mod glyphs;
@@ -28,6 +31,8 @@ pub mod worker;
 
 #[cfg(feature = "hid")]
 pub mod discover;
+#[cfg(feature = "hid")]
+pub mod streamdeck;
 
 pub use dock::Dock;
 pub use models::Model;

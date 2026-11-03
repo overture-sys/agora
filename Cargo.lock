@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agora"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "agora-device",
  "agora-host",
@@ -32,8 +32,9 @@ dependencies = [
 
 [[package]]
 name = "agora-device"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
+ "elgato-streamdeck",
  "hidapi",
  "image",
  "thiserror 2.0.21",
@@ -41,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "agora-host"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "agora-device",
  "axum",
@@ -59,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "agora-m18"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "agora-device",
 ]
@@ -1002,6 +1003,16 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "elgato-streamdeck"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b8b4c2eef635a4893c35f19ccd3bc6d6aa5a07e0ca7e43b61f782978abc5e"
+dependencies = [
+ "hidapi",
+ "image",
+]
 
 [[package]]
 name = "embed-resource"

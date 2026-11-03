@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/agora-device", "crates/agora-host", "crates/agora-m18", "src-tauri"]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "MIT"
 authors = ["overture-sys"]
@@ -13,6 +13,8 @@ repository = "https://gitlab.com/overture-group1/agora"
 agora-device = { path = "crates/agora-device" }
 agora-host = { path = "crates/agora-host" }
 hidapi = { version = "2", default-features = false, features = ["windows-native", "linux-static-hidraw"] }
+# Elgato Stream Deck driver (MPL-2.0). Used unchanged, as a dependency.
+elgato-streamdeck = { version = "=0.14.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp"] }
 thiserror = "2"
 

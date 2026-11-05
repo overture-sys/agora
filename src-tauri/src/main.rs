@@ -67,6 +67,9 @@ struct Settings {
     intro_seen_version: String,
     /// How long a key must be down to count as held, in milliseconds.
     hold_ms: u64,
+    /// How big the text on every key is, in percent of the size each action
+    /// asks for (50-200). A key with its own text size keeps it.
+    text_scale: u32,
     /// The device the editor shows (its id), when Agora knows several.
     selected_device: String,
     /// This Agora's version. Not saved; filled in for the window.
@@ -94,6 +97,7 @@ impl Default for Settings {
             intro_video: String::new(),
             intro_seen_version: String::new(),
             hold_ms: 500,
+            text_scale: 100,
             selected_device: String::new(),
             app_version: String::new(),
         }
@@ -424,6 +428,17 @@ fn set_hold_time(state: State<Shared>, host: State<Host>, ms: u64) -> Result<(),
         save_settings(&dock.settings_path, &dock.settings);
     }
     with_host(&host, |h| h.set_hold_time(ms))
+}
+
+#[tauri::command]
+fn set_text_scale(state: State<Shared>, host: State<Host>, percent: u32) -> Result<(), String> {
+    let percent = percent.clamp(50, 200);
+    {
+        let mut dock = state.lock().unwrap();
+        dock.settings.text_scale = percent;
+        save_settings(&dock.settings_path, &dock.settings);
+    }
+    with_host(&host, |h| h.set_text_scale(percent as f32 / 100.0))
 }
 
 /// `color` is "#rrggbb". Lights the whole ring (and the two front LEDs).
@@ -1170,6 +1185,7 @@ fn restart_host(
     };
     let (h, events) = start_host(app, use_vsd, first)?;
     h.set_hold_time(shared.lock().unwrap().settings.hold_ms);
+    h.set_text_scale(shared.lock().unwrap().settings.text_scale.clamp(50, 200) as f32 / 100.0);
     for d in open {
         let id = d.id.clone();
         h.set_device(d);
@@ -1808,6 +1824,7 @@ fn main() {
             forget_password,
             set_key_settings,
             set_key_look,
+            set_text_scale,
             set_key_hold,
             set_screen_saver,
             preview_screen_saver,

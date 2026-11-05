@@ -869,6 +869,8 @@ pub(crate) enum Msg {
     MoveToPage(usize, String, oneshot::Sender<Result<usize, String>>),
     /// How long a key must be down to count as held, in milliseconds.
     HoldTime(u64),
+    /// How big key titles are on every key, 1.0 = as the action asks.
+    TextScale(f32),
 }
 
 /// The app's handle on a running host. Methods block briefly; call them from
@@ -944,6 +946,7 @@ impl HostHandle {
             results: HashMap::new(),
             clipboard: None,
             hold_time: HOLD,
+            text_scale: 1.0,
         };
         runtime.spawn(state.run(rx));
         tx.send(Msg::AllFaces(true)).ok();
@@ -1020,6 +1023,13 @@ impl HostHandle {
     /// How long a key must be down to count as held (clamped to 200-2000 ms).
     pub fn set_hold_time(&self, ms: u64) {
         let _ = self.tx.send(Msg::HoldTime(ms));
+    }
+
+    /// How big key titles are on every key of every device, as a share of
+    /// the size the action asks for (clamped to 0.5-2.0). A key with its own
+    /// text size keeps it.
+    pub fn set_text_scale(&self, scale: f32) {
+        let _ = self.tx.send(Msg::TextScale(scale));
     }
 
     /// Presses and lets go of a key of the device the editor shows, as a tap.
@@ -1216,6 +1226,9 @@ struct State {
     clipboard: Option<Instance>,
     /// How long a key must be down to count as held.
     hold_time: Duration,
+    /// Scales every key's title (and the text of clocks and monitors),
+    /// unless the key has its own text size.
+    text_scale: f32,
 }
 
 /// What the host keeps about one device while Agora runs.
@@ -1538,7 +1551,7 @@ impl State {
             }
         };
         Face {
-            image: Some(builtin::monitor_image(&label, &value, bar)),
+            image: Some(builtin::monitor_image(&label, &value, bar, self.text_scale)),
             title: String::new(),
             show_title: true,
             align: "bottom".into(),
@@ -1571,6 +1584,7 @@ impl State {
             | Msg::SocketClosed(_)
             | Msg::PluginExited(..)
             | Msg::Restart(_)
+            | Msg::TextScale(_)
             | Msg::Shutdown(_) => None,
             _ => Some(self.ui_dev.clone()),
         };
@@ -1691,6 +1705,13 @@ impl State {
                 let _ = done.send(self.move_to_page(key, &page));
             }
             Msg::HoldTime(ms) => self.hold_time = Duration::from_millis(ms.clamp(200, 2000)),
+            Msg::TextScale(scale) => {
+                let scale = if scale.is_finite() { scale.clamp(0.5, 2.0) } else { 1.0 };
+                if scale != self.text_scale {
+                    self.text_scale = scale;
+                    self.each_live(|st| st.all_faces(false));
+                }
+            }
             Msg::SetHidden(uuid, hidden) => {
                 if hidden {
                     self.clear_plugin_keys(&uuid);
@@ -2199,8 +2220,12 @@ impl State {
         if let Some(v) = &look.color {
             face.color = v.clone();
         }
-        if let Some(v) = look.font_size {
-            face.font_size = v;
+        match look.font_size {
+            Some(v) if v > 0.0 => face.font_size = v,
+            _ => {
+                let base = if face.font_size > 0.0 { face.font_size } else { 9.0 };
+                face.font_size = base * self.text_scale;
+            }
         }
         if let Some(v) = &look.icon {
             face.image = Some(v.clone());
@@ -2871,7 +2896,7 @@ impl State {
             }
         };
         Face {
-            image: Some(builtin::monitor_image(&label, &value, bar)),
+            image: Some(builtin::monitor_image(&label, &value, bar, self.text_scale)),
             title: String::new(),
             show_title: true,
             align: "bottom".into(),

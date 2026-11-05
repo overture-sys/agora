@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1 beta (2026-11-05)
+
+- New: one text size for every key. Settings > Keys > "Text size on keys" makes the titles bigger or smaller (50% to 200%) on every key of every device, whatever app or plugin they come from. Clocks, timers, counters and monitors follow it too, and still shrink long values to fit.
+- New: a key can have its own text size, under "Title and icon". It keeps that size whatever the global setting is. Text sizes brought in from VSD Craft profiles count as a key's own size.
+- Text that a plugin draws into its own picture (rather than sending as a title) can't be resized.
+
 ## 0.9.0 beta (2026-11-03)
 
 First Elgato Stream Deck support.

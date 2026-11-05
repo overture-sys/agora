@@ -469,20 +469,32 @@ pub fn is_monitor(id: &str) -> bool {
 
 /// A monitor key's face: its name at the top, the value large in the
 /// middle and, when there is one, a bar for the share in use.
-pub fn monitor_image(label: &str, value: &str, share: Option<f32>) -> String {
+/// `scale` grows or shrinks both lines of text (the global key text size);
+/// they still shrink to fit the key.
+pub fn monitor_image(label: &str, value: &str, share: Option<f32>, scale: f32) -> String {
     let esc = |t: &str| {
         t.replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
     };
-    let size = match value.chars().count() {
-        0..=5 => 20,
-        6..=8 => 15,
-        9..=11 => 11,
-        12..=15 => 9,
-        _ => 8,
+    let size: f32 = match value.chars().count() {
+        0..=5 => 20.0,
+        6..=8 => 15.0,
+        9..=11 => 11.0,
+        12..=15 => 9.0,
+        _ => 8.0,
     };
-    let label_size = if label.chars().count() > 9 { 8 } else { 10 };
+    let label_size: f32 = if label.chars().count() > 9 { 8.0 } else { 10.0 };
+    // Bigger text must still fit across the key: about 0.6 em per character
+    // in a 66-unit-wide line.
+    let fit = |base: f32, chars: usize| {
+        // Clocks and monitors already use big text, so they grow less.
+        let want = base * scale.clamp(0.5, 1.4);
+        let room = 66.0 / (0.6 * chars.max(1) as f32);
+        if want > base { want.min(room.max(base)) } else { want }
+    };
+    let size = fit(size, value.chars().count());
+    let label_size = fit(label_size, label.chars().count());
     let bar = share.map_or(String::new(), |f| {
         let f = f.clamp(0.0, 1.0);
         let color = if f >= 0.9 {
@@ -498,7 +510,7 @@ pub fn monitor_image(label: &str, value: &str, share: Option<f32>) -> String {
         )
     });
     let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72"><rect width="72" height="72" fill="#1d1915"/><text x="36" y="18" font-family="sans-serif" font-size="{label_size}" font-weight="600" letter-spacing="0.5" text-anchor="middle" fill="#c9b79c">{}</text><text x="36" y="{}" font-family="sans-serif" font-size="{size}" font-weight="700" text-anchor="middle" fill="#f3ecdf">{}</text>{bar}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72"><rect width="72" height="72" fill="#1d1915"/><text x="36" y="18" font-family="sans-serif" font-size="{label_size:.1}" font-weight="600" letter-spacing="0.5" text-anchor="middle" fill="#c9b79c">{}</text><text x="36" y="{}" font-family="sans-serif" font-size="{size:.1}" font-weight="700" text-anchor="middle" fill="#f3ecdf">{}</text>{bar}</svg>"##,
         esc(label),
         if share.is_some() { 44 } else { 46 },
         esc(value)
@@ -609,5 +621,19 @@ mod tests {
             resvg::usvg::Tree::from_data(&svg, &Default::default())
                 .unwrap_or_else(|e| panic!("{}: {e}", d.id));
         }
+    }
+
+    #[test]
+    fn monitor_text_follows_the_text_size_but_still_fits() {
+        let svg_of = |scale: f32, value: &str| {
+            let uri = monitor_image("CPU", value, Some(0.5), scale);
+            let b64 = uri.strip_prefix("data:image/svg+xml;base64,").unwrap();
+            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b64).unwrap()).unwrap()
+        };
+        assert!(svg_of(1.0, "42%").contains(r#"font-size="20.0""#));
+        assert!(svg_of(0.5, "42%").contains(r#"font-size="10.0""#));
+        assert!(svg_of(2.0, "42%").contains(r#"font-size="28.0""#));
+        // A long value that already fills the key stays at its size.
+        assert!(svg_of(2.0, "192.168.100.200").contains(r#"font-size="9.0""#));
     }
 }

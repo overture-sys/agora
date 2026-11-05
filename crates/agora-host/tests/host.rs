@@ -1150,3 +1150,26 @@ fn pages_can_be_put_in_a_new_order() {
     let (host, _rx) = start(data.path());
     assert_eq!(names(&host), ["Page 2", "Page 3", "Page 1"]);
 }
+
+#[test]
+fn text_size_applies_to_every_key_unless_a_key_has_its_own() {
+    let data = tempfile::tempdir().unwrap();
+    let (host, rx) = start(data.path());
+    host.place(5, builtin::PLUGIN, builtin::FOLDER).unwrap();
+    host.set_settings(5, serde_json::json!({ "name": "Games" }));
+    let size = |want: f32| {
+        move |e: &HostEvent| matches!(e, HostEvent::Face { key: 5, face, .. } if face.title == "Games" && (face.font_size - want).abs() < 0.01)
+    };
+    wait_for(&rx, 5, size(11.0));
+    host.set_text_scale(1.5);
+    wait_for(&rx, 5, size(16.5));
+    // Out of range is clamped.
+    host.set_text_scale(9.0);
+    wait_for(&rx, 5, size(22.0));
+    // A key's own size wins over the global one.
+    host.set_look(5, Look { font_size: Some(8.0), ..Default::default() });
+    wait_for(&rx, 5, size(8.0));
+    host.set_text_scale(0.5);
+    host.set_look(5, Look::default());
+    wait_for(&rx, 5, size(5.5));
+}

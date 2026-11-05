@@ -141,7 +141,7 @@ pub fn face_svg(face: &Face) -> String {
         };
         for (i, line) in lines.iter().enumerate() {
             svg.push_str(&format!(
-                r##"<text x="36" y="{:.1}" font-family="sans-serif" font-size="{size}" font-weight="600" text-anchor="middle" fill="{}" stroke="#000" stroke-width="{:.1}" paint-order="stroke">{}</text>"##,
+                r##"<text x="36" y="{:.1}" font-family="sans-serif" font-size="{size:.1}" font-weight="600" text-anchor="middle" fill="{}" stroke="#000" stroke-width="{:.1}" paint-order="stroke">{}</text>"##,
                 first_y + line_h * i as f32,
                 safe_color(&face.color),
                 size / 5.0,

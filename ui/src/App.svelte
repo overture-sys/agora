@@ -28,7 +28,7 @@
   type Preview = { key: number; image: string | null };
   type PageOverview = { layout: LayoutView; keys: KeyInfo[] };
   type Line = { plugin: string; message: string };
-  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[]; theme?: string; saver?: string; saver_minutes?: number; saver_gif?: string; dock_intro?: boolean; intro?: string; intro_video?: string; intro_seen_version?: string; hold_ms?: number; app_version?: string };
+  type Settings = { brightness: number; ring_color: string; ring_on: boolean; ring_brightness: number; use_vsd_craft_plugins: boolean; start_with_windows: boolean; ring_colors: string[]; theme?: string; saver?: string; saver_minutes?: number; saver_gif?: string; dock_intro?: boolean; intro?: string; intro_video?: string; intro_seen_version?: string; hold_ms?: number; text_scale?: number; app_version?: string };
   type LogLine = { time: string; text: string; err: boolean };
   type Page = "home" | "keys" | "plugins" | "dock" | "settings";
 
@@ -145,7 +145,7 @@
   const savingCommands = new Set([
     "place_action", "move_key", "set_key_settings", "set_key_look", "layout_op", "set_brightness", "set_ring",
     "set_ring_lights", "ring_off", "set_ring_brightness", "set_start_with_windows", "set_use_vsd_craft_plugins",
-    "import_vsd_profiles", "show_plugin", "set_key_hold", "set_screen_saver", "set_intro",
+    "import_vsd_profiles", "show_plugin", "set_key_hold", "set_screen_saver", "set_intro", "set_text_scale",
   ]);
 
   function flash(text: string) {
@@ -1741,6 +1741,11 @@
           <option value="">Position: the action's</option><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option>
         </select>
         <label class="check">Colour <input type="color" value={lk.color ?? "#ffffff"} onchange={(e) => saveLook({ color: e.currentTarget.value })} /></label>
+        <select value={lk.font_size ? String(lk.font_size) : ""} onchange={(e) => saveLook({ font_size: e.currentTarget.value ? Number(e.currentTarget.value) : null })} aria-label="Text size">
+          <option value="">Size: same as all keys</option>
+          {#each [6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28] as n}<option value={String(n)}>Size {n}</option>{/each}
+          {#if lk.font_size && ![6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28].includes(lk.font_size)}<option value={String(lk.font_size)}>Size {lk.font_size}</option>{/if}
+        </select>
       </div>
       <div class="row wrap">
         <label class="button-like">Choose icon…<input type="file" accept="image/*" onchange={pickIcon} hidden /></label>
@@ -2148,6 +2153,16 @@
               onchange={() => call("set_hold_time", { ms: settings.hold_ms ?? 500 })} />
           </label>
           <p class="muted small">How long to keep a key down for its "When held" steps. Shorter feels quicker; longer avoids running them by accident.</p>
+          <label class="slider">
+            <span>Text size on keys <b>{settings.text_scale ?? 100}%</b></span>
+            <input type="range" min="50" max="200" step="5" bind:value={settings.text_scale}
+              style="--fill: {(((settings.text_scale ?? 100) - 50) / 150) * 100}%"
+              onchange={() => call("set_text_scale", { percent: settings.text_scale ?? 100 })} />
+          </label>
+          <div class="row">
+            {#if (settings.text_scale ?? 100) !== 100}<button onclick={() => { settings.text_scale = 100; call("set_text_scale", { percent: 100 }); }}>Back to 100%</button>{/if}
+          </div>
+          <p class="muted small">Makes the titles on every key bigger or smaller, whatever app or plugin they come from, on every device. Clocks and monitors follow it too. A key given its own size under "Title and icon" keeps that size. Text a plugin draws into its picture can't be resized.</p>
         </section>
       </div>
     {/if}

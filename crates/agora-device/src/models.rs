@@ -18,6 +18,16 @@ pub struct Screen {
     pub height: u32,
 }
 
+/// The boot logo: the full-screen picture the dock keeps in its own memory
+/// and shows when it starts, and whenever no app is driving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootLogo {
+    pub width: u32,
+    pub height: u32,
+    /// How the picture is turned before it is sent.
+    pub orientation: Orientation,
+}
+
 /// The report ids of one knob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dial {
@@ -67,6 +77,15 @@ pub struct Model {
     pub vsd_device: Option<&'static str>,
     /// Tried on a real dock by us.
     pub tested: bool,
+    /// Its boot logo, if Agora may replace it. The logo is written to the
+    /// dock's own memory, and MiraBox warns that a picture of the wrong size
+    /// or turn can brick a dock, so a model only gets one here once its
+    /// exact canvas is known. Sizes from MiraBox's MIT StreamDock-Device-SDK
+    /// (Python-SDK `touchscreen_image_format`); for models not yet enabled:
+    /// 293V3 / N4 / N4 Pro 800x480 turned 180, 293S V3 854x480 turned 90,
+    /// XL 1024x600 turned 180, N3 320x240 turned -90 (older 293 and 293S
+    /// take raw pixels instead of JPEG).
+    pub boot_logo: Option<BootLogo>,
 }
 
 impl Model {
@@ -90,6 +109,14 @@ impl Model {
             height: s.height,
         };
         DeviceSpec {
+            boot_logo: self.boot_logo.map(|l| Size {
+                width: l.width,
+                height: l.height,
+            }),
+            boot_logo_orientation: self
+                .boot_logo
+                .map(|l| l.orientation)
+                .unwrap_or_default(),
             family: Family::StreamDock,
             id: self.id.into(),
             name: self.name.into(),
@@ -196,6 +223,7 @@ const BASE: Model = Model {
     ring_leds: 0,
     vsd_device: None,
     tested: false,
+    boot_logo: None,
 };
 
 pub const M18: Model = Model {
@@ -207,6 +235,12 @@ pub const M18: Model = Model {
     ring_leds: 24,
     vsd_device: Some("VSDM18"),
     tested: true,
+    // 480x272 JPEG, upright: MiraBox SDK StreamDockM18.touchscreen_image_format.
+    boot_logo: Some(BootLogo {
+        width: 480,
+        height: 272,
+        orientation: Orientation::Upright,
+    }),
     ..BASE
 };
 

@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agora"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "agora-device",
  "agora-host",
@@ -32,17 +32,18 @@ dependencies = [
 
 [[package]]
 name = "agora-device"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "elgato-streamdeck",
  "hidapi",
  "image",
+ "jpeg-encoder",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "agora-host"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "agora-device",
  "axum",
@@ -60,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "agora-m18"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "agora-device",
 ]
@@ -2140,6 +2141,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "jpeg-encoder"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b454d911ac55068f53495488d8ccd0646eaa540c033a28ee15b07838afafb01f"
 
 [[package]]
 name = "js-sys"

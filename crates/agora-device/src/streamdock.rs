@@ -223,6 +223,63 @@ impl<T: Transport> StreamDock<T> {
         self.cmd(b"DELED")
     }
 
+    /// Writes `jpeg` as the dock's boot logo, the picture it keeps in its
+    /// own memory and shows when it starts or no app drives it.
+    ///
+    /// Byte for byte what MiraBox's transport library sends
+    /// (`Transport::setBackgroundImgStream`, read from its libtransport.so):
+    /// `CRT\0\0LOG`, the size as u32 big endian, `0x01`, then the JPEG in
+    /// raw pages, then a wait for the dock's answer. No STP. The picture
+    /// must be a JPEG of exactly the model's logo size: MiraBox warns that
+    /// anything else can brick a dock, so it is checked here once more.
+    pub fn set_boot_logo(&mut self, jpeg: &[u8]) -> Result<()> {
+        let logo = self.model.boot_logo.ok_or(Error::Unsupported)?;
+        if jpeg.len() > crate::keyimage::MAX_BOOT_LOGO {
+            return Err(Error::TooLong {
+                len: jpeg.len(),
+                max: crate::keyimage::MAX_BOOT_LOGO,
+            });
+        }
+        let (w, h) = crate::keyimage::jpeg_size(jpeg)
+            .ok_or_else(|| Error::Image("The boot logo isn't a JPEG".into()))?;
+        let want = match logo.orientation {
+            crate::keyimage::Orientation::Rotate90
+            | crate::keyimage::Orientation::Rotate270
+            | crate::keyimage::Orientation::Transpose => (logo.height, logo.width),
+            _ => (logo.width, logo.height),
+        };
+        if (w, h) != want {
+            return Err(Error::Image(format!(
+                "The boot logo must be {}x{}, not {w}x{h}",
+                want.0, want.1
+            )));
+        }
+        let len = (jpeg.len() as u32).to_be_bytes();
+        self.cmd(&[b'L', b'O', b'G', len[0], len[1], len[2], len[3], 0x01])?;
+        for page in jpeg.chunks(self.model.packet) {
+            self.raw(page)?;
+        }
+        // The dock answers once the picture is stored. Wait for it (up to
+        // ten seconds) so nothing else is sent while it writes its memory.
+        let mut buf = [0u8; IN_LEN];
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < until {
+            let n = self.t.read(&mut buf, 250)?;
+            if n == 0 {
+                continue;
+            }
+            // "ACK\0\0OK" is the answer; a key pressed meanwhile is kept.
+            if n >= 7 && &buf[5..7] == b"OK" {
+                break;
+            }
+            match parse_event(&buf[..n], self.model) {
+                Some(ev) if !matches!(ev.control, Control::Unknown(_)) => self.pending.push_back(ev),
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+
     /// Hands the dock back to its stock screen.
     pub fn close(&mut self) -> Result<()> {
         self.cmd(&[b'C', b'L', b'E', 0, 0x44, 0x43])?;
@@ -291,6 +348,9 @@ impl<T: Transport> Dock for StreamDock<T> {
     fn ring_reset(&mut self) -> Result<()> {
         StreamDock::ring_reset(self)
     }
+    fn set_boot_logo(&mut self, jpeg: &[u8]) -> Result<()> {
+        StreamDock::set_boot_logo(self, jpeg)
+    }
     fn close(&mut self) -> Result<()> {
         StreamDock::close(self)
     }
@@ -355,6 +415,58 @@ mod tests {
 
     fn dock() -> StreamDock<FakeTransport> {
         StreamDock::new(&M18, FakeTransport::default())
+    }
+
+    fn picture(w: u32, h: u32) -> crate::keyimage::DynamicImage {
+        crate::keyimage::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x * y) % 256) as u8])
+        }))
+    }
+
+    #[test]
+    fn boot_logo_goes_out_as_mirabox_sends_it() {
+        let jpeg = M18.spec().encode_boot_logo(&picture(1000, 700)).unwrap();
+        assert_eq!(crate::keyimage::jpeg_size(&jpeg), Some((480, 272)));
+        let mut d = dock();
+        d.t.to_read.push_back(b"ACK\0\0OK\0".to_vec());
+        d.set_boot_logo(&jpeg).unwrap();
+        let w = &d.t.written;
+        let n = jpeg.len() as u32;
+        let mut head = b"CRT\0\0LOG".to_vec();
+        head.extend_from_slice(&n.to_be_bytes());
+        head.push(0x01);
+        assert_eq!(w[0], head);
+        assert_eq!(w.len(), 1 + jpeg.len().div_ceil(1024));
+        assert_eq!(w[1..].concat(), jpeg);
+        // No STP after it, as in MiraBox's library.
+        assert!(!w.last().unwrap().starts_with(b"CRT"));
+    }
+
+    #[test]
+    fn boot_logo_refuses_the_wrong_size_or_model() {
+        let mut d = dock();
+        let small = crate::keyimage::to_jpeg(&picture(64, 64), 64, 64, crate::keyimage::Orientation::Upright).unwrap();
+        assert!(d.set_boot_logo(&small).is_err());
+        assert!(d.set_boot_logo(b"not a jpeg").is_err());
+        assert!(d.t.written.is_empty());
+        let mut n4 = StreamDock::new(&models::N4, FakeTransport::default());
+        let jpeg = M18.spec().encode_boot_logo(&picture(480, 272)).unwrap();
+        assert!(matches!(n4.set_boot_logo(&jpeg), Err(Error::Unsupported)));
+        assert!(models::N4.spec().encode_boot_logo(&picture(10, 10)).is_err());
+    }
+
+    #[test]
+    fn a_key_pressed_while_the_logo_is_stored_is_kept() {
+        let jpeg = M18.spec().encode_boot_logo(&picture(480, 272)).unwrap();
+        let mut d = dock();
+        let mut press = vec![0u8; 16];
+        press[..3].copy_from_slice(b"ACK");
+        press[9] = 1;
+        press[10] = 1;
+        d.t.to_read.push_back(press);
+        d.t.to_read.push_back(b"ACK\0\0OK\0".to_vec());
+        d.set_boot_logo(&jpeg).unwrap();
+        assert!(d.read_event(0).unwrap().is_some());
     }
 
     #[test]

@@ -75,6 +75,10 @@ pub struct DeviceSpec {
     pub vsd_device: Option<String>,
     /// Tried on a real device by us.
     pub tested: bool,
+    /// The boot logo's size, if Agora can replace it on this model.
+    pub boot_logo: Option<Size>,
+    /// How the boot logo is turned before it is sent.
+    pub boot_logo_orientation: Orientation,
 }
 
 impl DeviceSpec {
@@ -89,6 +93,14 @@ impl DeviceSpec {
 
     pub fn has_strip(&self) -> bool {
         !self.strip.is_empty()
+    }
+
+    /// Encodes a picture as this model's boot logo: scaled to fill the
+    /// logo's exact size, turned, as a baseline JPEG. Fails on a model whose
+    /// logo Agora can't replace.
+    pub fn encode_boot_logo(&self, img: &DynamicImage) -> Result<Vec<u8>> {
+        let size = self.boot_logo.ok_or(crate::Error::Unsupported)?;
+        keyimage::boot_logo_jpeg(img, size.width, size.height, self.boot_logo_orientation)
     }
 
     /// Encodes a picture for one screen of this device: scaled to fill it,

@@ -25,6 +25,10 @@ pub enum Command {
     /// Hand the ring back to the dock's own lighting.
     RingReset,
     ClearAll,
+    /// Write a new boot logo into the dock's own memory, already encoded
+    /// ([`DeviceSpec::encode_boot_logo`]). The answer comes back as
+    /// [`Event::BootLogo`]; a refusal doesn't stop the worker.
+    BootLogo(Vec<u8>),
     /// Hand the dock back to its stock screen and stop the thread.
     Shutdown,
 }
@@ -34,6 +38,8 @@ pub enum Event {
     Input(InputEvent),
     /// A command or read failed. The worker stops after a USB error.
     Error(String),
+    /// How writing a boot logo went: `Err` holds why it failed.
+    BootLogo(std::result::Result<(), String>),
     Stopped,
 }
 
@@ -130,6 +136,22 @@ fn run<D: Dock>(mut dock: D, rx: Receiver<Command>, events: Sender<Event>) {
                 }
                 Command::RingReset => dock.ring_reset(),
                 Command::ClearAll => dock.clear_all(),
+                Command::BootLogo(jpeg) => match dock.set_boot_logo(&jpeg) {
+                    Ok(()) => {
+                        let _ = events.send(Event::BootLogo(Ok(())));
+                        Ok(())
+                    }
+                    // Checks that fail before anything is sent leave the
+                    // dock as it was; only a USB failure stops the worker.
+                    Err(e @ crate::Error::Usb(_)) => {
+                        let _ = events.send(Event::BootLogo(Err(e.to_string())));
+                        Err(e)
+                    }
+                    Err(e) => {
+                        let _ = events.send(Event::BootLogo(Err(e.to_string())));
+                        Ok(())
+                    }
+                },
                 Command::Shutdown => {
                     stop(&mut dock, ring_used);
                     let _ = events.send(Event::Stopped);

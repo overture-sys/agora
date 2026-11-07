@@ -138,6 +138,8 @@ pub fn spec(kind: Kind) -> DeviceSpec {
         // Tried by us on a Mini (2026-11-03): keys, plugins, brightness,
         // screen saver, and the logo coming back on quit.
         tested: kind == Kind::Mini,
+        boot_logo: None,
+        boot_logo_orientation: Orientation::Upright,
     }
 }
 

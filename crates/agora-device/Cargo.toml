@@ -17,3 +17,4 @@ hidapi = { workspace = true, optional = true }
 elgato-streamdeck = { workspace = true, optional = true }
 image.workspace = true
 thiserror.workspace = true
+jpeg-encoder.workspace = true

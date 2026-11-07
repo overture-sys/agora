@@ -57,6 +57,12 @@ pub trait Dock: Send {
         Ok(())
     }
 
+    /// Writes a new boot logo into the device's own memory. `jpeg` must
+    /// come from [`DeviceSpec::encode_boot_logo`]. Devices without one refuse.
+    fn set_boot_logo(&mut self, _jpeg: &[u8]) -> Result<()> {
+        Err(Error::Unsupported)
+    }
+
     /// Hands the device back to its stock screen.
     fn close(&mut self) -> Result<()>;
 
@@ -100,6 +106,9 @@ impl Dock for Box<dyn Dock> {
     }
     fn ring_reset(&mut self) -> Result<()> {
         (**self).ring_reset()
+    }
+    fn set_boot_logo(&mut self, jpeg: &[u8]) -> Result<()> {
+        (**self).set_boot_logo(jpeg)
     }
     fn close(&mut self) -> Result<()> {
         (**self).close()

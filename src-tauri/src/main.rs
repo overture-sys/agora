@@ -272,6 +272,9 @@ struct Status {
     ring_leds: usize,
     /// Tried on a real dock of this model.
     tested: bool,
+    /// The boot logo's [width, height], if Agora can replace it on the
+    /// device the editor shows.
+    boot_logo: Option<[u32; 2]>,
     message: String,
     /// The device the editor shows.
     device_id: String,
@@ -317,6 +320,7 @@ fn status(dock: &Dock, message: impl Into<String>) -> Status {
         strip: m.has_strip(),
         ring_leds: m.ring_leds,
         tested: m.tested,
+        boot_logo: m.boot_logo.map(|s| [s.width, s.height]),
         message: message.into(),
         device_id: dock.selected.clone(),
         devices: dock.known.clone(),
@@ -402,6 +406,49 @@ fn set_brightness(state: State<Shared>, percent: u8) -> Result<(), String> {
         |s| s.brightness = percent.min(100),
         vec![Command::Brightness(percent)],
     )
+}
+
+/// The largest picture file taken for a boot logo.
+const MAX_LOGO_FILE: usize = 25 * 1024 * 1024;
+
+/// Writes a new boot logo into the shown dock's own memory. `image` is the
+/// picture file as a data URI (PNG, JPEG, GIF, BMP or WebP); it is scaled
+/// to fill the model's logo size, cropping what sticks out, the way the
+/// window's preview shows it. The answer arrives as a "boot-logo" event.
+#[tauri::command]
+fn set_boot_logo(state: State<Shared>, image: String) -> Result<(), String> {
+    let b64 = image
+        .split_once(";base64,")
+        .filter(|(head, _)| head.starts_with("data:image/"))
+        .map(|(_, b)| b)
+        .ok_or("That isn't a picture")?;
+    if b64.len() > MAX_LOGO_FILE * 4 / 3 + 4 {
+        return Err("That picture is too big (25 MB at most)".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|_| "That isn't a picture".to_string())?;
+    let img = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|_| "Agora can't read that picture. Try a PNG or JPEG.".to_string())?;
+    let dock = state.lock().unwrap();
+    let a = dock.shown().ok_or("Connect the dock first")?;
+    if a.spec.boot_logo.is_none() {
+        return Err(format!("Agora can't change the boot logo on the {} yet", a.spec.name));
+    }
+    let jpeg = a.spec.encode_boot_logo(&img).map_err(|e| e.to_string())?;
+    if !a.worker.send(Command::BootLogo(jpeg)) {
+        return Err("The dock isn't answering".into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Serialize)]
+struct BootLogoDone {
+    device: String,
+    error: Option<String>,
 }
 
 #[tauri::command]
@@ -1754,6 +1801,29 @@ fn forward_events(app: &AppHandle, host: &Host, device: &str, events: Receiver<E
             Event::Error(e) => {
                 let _ = app.emit("dock-error", e);
             }
+            Event::BootLogo(r) => {
+                if r.is_ok() {
+                    // Storing the logo can take longer than the keepalive,
+                    // so put the brightness, ring and keys back.
+                    {
+                        let shared = app.state::<Shared>();
+                        let dock = shared.lock().unwrap();
+                        if let Some(a) = dock.attached(device) {
+                            apply_settings(&a.worker, &dock.settings);
+                        }
+                    }
+                    if let Some(h) = host.lock().unwrap().as_ref() {
+                        h.redraw_device(device);
+                    }
+                }
+                let _ = app.emit(
+                    "boot-logo",
+                    BootLogoDone {
+                        device: device.into(),
+                        error: r.err(),
+                    },
+                );
+            }
             Event::Stopped => break,
         }
     }
@@ -1784,6 +1854,7 @@ fn main() {
             dock_status,
             select_device,
             set_brightness,
+            set_boot_logo,
             set_ring,
             set_ring_brightness,
             ring_off,

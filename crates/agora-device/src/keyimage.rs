@@ -135,6 +135,54 @@ pub fn encode(
     }
 }
 
+/// The largest boot logo MiraBox's own SDK will send, in bytes.
+pub const MAX_BOOT_LOGO: usize = 522_240;
+
+/// Scales `img` to fill exactly `width` x `height` (cropping what sticks
+/// out), turns it, and encodes it as a JPEG under [`MAX_BOOT_LOGO`],
+/// stepping the quality down from 95 the way MiraBox's SDK does.
+pub fn boot_logo_jpeg(
+    img: &DynamicImage,
+    width: u32,
+    height: u32,
+    orientation: Orientation,
+) -> Result<Vec<u8>> {
+    let filled = img.resize_to_fill(width, height, FilterType::Lanczos3);
+    let turned = orientation.apply(filled).to_rgb8();
+    let mut quality = 95;
+    loop {
+        // Baseline, 4:2:0, like the PIL JPEGs MiraBox's SDK sends: the
+        // dock's own decoder reads this picture at start-up.
+        let mut out = Vec::new();
+        let mut enc = jpeg_encoder::Encoder::new(&mut out, quality);
+        enc.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
+        enc.encode(
+            turned.as_raw(),
+            turned.width() as u16,
+            turned.height() as u16,
+            jpeg_encoder::ColorType::Rgb,
+        )
+        .map_err(|e| Error::Image(e.to_string()))?;
+        if out.len() <= MAX_BOOT_LOGO {
+            return Ok(out);
+        }
+        if quality <= 20 {
+            return Err(Error::TooLong {
+                len: out.len(),
+                max: MAX_BOOT_LOGO,
+            });
+        }
+        quality -= 10;
+    }
+}
+
+/// Reads a JPEG's width and height from its header without decoding it.
+pub fn jpeg_size(jpeg: &[u8]) -> Option<(u32, u32)> {
+    use image::ImageDecoder;
+    let dec = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(jpeg)).ok()?;
+    Some(dec.dimensions())
+}
+
 /// Centres a square face on a black `width` x `height` canvas, scaled to
 /// the short side, for screens that aren't square (the N4's strip).
 pub fn letterbox(img: &DynamicImage, width: u32, height: u32) -> DynamicImage {

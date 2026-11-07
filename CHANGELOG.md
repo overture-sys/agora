@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.2 beta (2026-11-07)
+
+- New: your own boot logo on the Stream Dock M18. Dock > Boot logo: choose a picture (or "Use the Agora logo", the temple made for the M18), see it cropped to the dock's 480x272 screen, and write it to the dock. The dock keeps it in its own memory and shows it when it starts and whenever Agora isn't running.
+- Sent exactly as MiraBox's own StreamDock SDK sends it (baseline JPEG, 4:2:0, the model's exact size). Other Stream Dock models get it once their size is confirmed; Stream Decks don't have it.
+
 ## 0.9.1 beta (2026-11-05)
 
 - New: one text size for every key. Settings > Keys > "Text size on keys" makes the titles bigger or smaller (50% to 200%) on every key of every device, whatever app or plugin they come from. Clocks, timers, counters and monitors follow it too, and still shrink long values to fit.

@@ -4,6 +4,8 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { onMount, tick } from "svelte";
   import Intro from "./Intro.svelte";
+  // @ts-ignore: Vite turns the picture into a URL.
+  import agoraLogoUrl from "./assets/agora-boot-logo.png";
   import "@fontsource/marcellus-sc/400.css";
   import "@fontsource/inter/400.css";
   import "@fontsource/inter/500.css";
@@ -13,7 +15,7 @@
   type Status = {
     connected: boolean; model: string | null; model_id: string; model_name: string; rows: number; columns: number;
     buttons: number; dials: number; strip: boolean; ring_leds: number; tested: boolean; message: string;
-    device_id?: string; devices?: DeviceLine[];
+    boot_logo?: [number, number] | null; device_id?: string; devices?: DeviceLine[];
   };
   type DeviceLine = { id: string; name: string; model: string; connected: boolean };
   type Input = { kind: string; index: number; pressed: boolean; turn: number; raw_id: number };
@@ -79,6 +81,12 @@
   let log = $state<LogLine[]>([]);
   let settings = $state<Settings>({ brightness: 80, ring_color: "#d9794a", ring_on: false, ring_brightness: 100, use_vsd_craft_plugins: false, start_with_windows: false, ring_colors: [] });
   let error = $state("");
+  // Boot logo: the picture chosen (data URI), whether it is being written,
+  // and the confirm step before writing to the dock's memory.
+  let logoSrc = $state("");
+  let logoBusy = $state(false);
+  let logoAsk = $state(false);
+  let logoMsg = $state("");
   let notice = $state("");
   // What was just removed, with a way to put it back for a few seconds.
   type Toast = { text: string; undo: () => Promise<void>; commit?: () => Promise<void> };
@@ -165,6 +173,48 @@
       // Saved for later rather than failed.
       if (msg.startsWith("Saved.")) flash(msg);
       else error = msg;
+    }
+  }
+
+  /// Reads the picture chosen for the boot logo; the preview crops it the
+  /// way Agora will (fill the screen, centred).
+  function pickLogo(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    logoMsg = "";
+    logoAsk = false;
+    if (!file) return;
+    if (file.size > 25 * 1024 * 1024) {
+      error = "That picture is too big (25 MB at most).";
+      return;
+    }
+    const r = new FileReader();
+    r.onload = () => (logoSrc = String(r.result));
+    r.readAsDataURL(file);
+  }
+
+  /// The Agora temple logo, made at the M18's 480x272.
+  async function useAgoraLogo() {
+    logoMsg = "";
+    logoAsk = false;
+    const blob = await fetch(agoraLogoUrl).then((r) => r.blob());
+    const r = new FileReader();
+    r.onload = () => (logoSrc = String(r.result));
+    r.readAsDataURL(blob);
+  }
+
+  async function writeLogo() {
+    logoAsk = false;
+    logoBusy = true;
+    logoMsg = "Writing it to the dock. Don't unplug it…";
+    const ok = await invoke("set_boot_logo", { image: logoSrc }).then(() => true, (e) => {
+      error = String(e);
+      return false;
+    });
+    if (!ok) {
+      logoBusy = false;
+      logoMsg = "";
     }
   }
 
@@ -1106,6 +1156,16 @@
       listen<Status>("dock-status", (e) => setStatus(e.payload)),
       listen<Input>("dock-input", (e) => onInput(e.payload)),
       listen<string>("dock-error", (e) => (error = e.payload)),
+      listen<{ device: string; error: string | null }>("boot-logo", (e) => {
+        logoBusy = false;
+        if (e.payload.error) {
+          logoMsg = "";
+          error = `The boot logo wasn't written: ${e.payload.error}`;
+        } else {
+          logoMsg = "Done. Unplug the dock and plug it back in (or quit Agora) to see it.";
+          logoSrc = "";
+        }
+      }),
       // Faces come one key at a time; draw them together, once a frame.
       listen<Preview>("key-preview", (e) => {
         pendingPreviews.set(e.payload.key, e.payload.image);
@@ -2091,6 +2151,35 @@
               onchange={() => call("set_ring_brightness", { percent: settings.ring_brightness })}
             />
           </label>
+        </section>
+        {/if}
+        {#if status.boot_logo}
+        {@const [lw, lh] = status.boot_logo}
+        <section class="logo-card">
+          <h2>Boot logo</h2>
+          <p class="muted small">The picture the {status.model_name} shows when it starts up and whenever Agora isn't running. It's {lw}×{lh}; a picture of another shape is cropped to fill it, as shown.</p>
+          <div class="logo-preview" style="aspect-ratio: {lw} / {lh}">
+            {#if logoSrc}<img src={logoSrc} alt="The new boot logo, as it will fill the dock's screen" />{:else}<span class="muted small">No picture chosen</span>{/if}
+          </div>
+          <div class="row">
+            <label class="button-like">Choose picture…<input type="file" accept="image/png,image/jpeg,image/gif,image/bmp" onchange={pickLogo} hidden disabled={logoBusy} /></label>
+            <button disabled={logoBusy} onclick={useAgoraLogo}>Use the Agora logo</button>
+            {#if logoSrc && !logoAsk}
+              <button class="primary" disabled={!status.connected || logoBusy} onclick={() => (logoAsk = true)}>Put it on the dock…</button>
+            {/if}
+          </div>
+          {#if !status.connected}<p class="muted small">Connect the dock to change it.</p>{/if}
+          {#if logoAsk}
+            <div class="logo-confirm" role="alertdialog" aria-labelledby="logo-q">
+              <p id="logo-q"><b>Write this into the dock's own memory?</b></p>
+              <p class="small">It stays on the dock after you unplug it or close Agora, and replaces the stock logo. Agora has no copy of the stock logo to put back, but you can always replace this one with another picture (here, or with VSD Craft's "Replace the boot logo"). Keep the dock plugged in while it saves.</p>
+              <div class="row">
+                <button class="primary" onclick={writeLogo}>Write it to the dock</button>
+                <button onclick={() => (logoAsk = false)}>Cancel</button>
+              </div>
+            </div>
+          {/if}
+          {#if logoMsg}<p class="small" role="status">{logoMsg}</p>{/if}
         </section>
         {/if}
 

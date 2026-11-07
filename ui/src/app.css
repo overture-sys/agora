@@ -173,6 +173,11 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
 /* Dock */
 .dock-page { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: stretch; }
 .dock-page > section { display: flex; flex-direction: column; gap: 4px; }
+.logo-card { gap: 10px !important; }
+.logo-preview { width: 100%; max-width: 480px; background: #000; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: grid; place-items: center; }
+.logo-preview img { width: 100%; height: 100%; object-fit: cover; object-position: center; display: block; }
+.logo-confirm { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.logo-confirm p { margin: 0; }
 .model-line { margin: -4px 0 4px; }
 .saver { margin: 14px 0 0; gap: 8px; }
 .field-label { font-size: 13px; color: var(--muted); }

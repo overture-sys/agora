@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/agora-device", "crates/agora-host", "crates/agora-m18", "src-tauri"]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2021"
 license = "MIT"
 authors = ["overture-sys"]
@@ -17,6 +17,8 @@ hidapi = { version = "2", default-features = false, features = ["windows-native"
 elgato-streamdeck = { version = "=0.14.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp"] }
 thiserror = "2"
+# Boot logos: baseline JPEG with 4:2:0 chroma, as MiraBox's SDK makes them (MIT/Apache-2.0).
+jpeg-encoder = { version = "0.6", default-features = false, features = ["std"] }
 
 [profile.release]
 strip = true

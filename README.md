@@ -29,7 +29,7 @@ Your keys, profiles and settings live in `%APPDATA%\Agora` and are kept when you
 - **Multi-actions:** run several actions in order with pauses, a Toggle that alternates between two lists, a Random action that picks one, and a Knob action for turning left, turning right and pressing.
 - **Plugins:** runs Stream Dock plugins unchanged (Node.js, HTML and .exe plugins), with their own settings panels. Knob actions get dial turns, presses and strip taps. Tested with Winged Keys and Shannon Keys.
 - **Undo:** removing a key, page, profile or plugin can be undone for a few seconds (Undo, or Ctrl+Z).
-- **Dock:** screen brightness, the M18's light ring (one colour, or paint it light by light), start with Windows, a screen saver (Matrix rain, the Agora temple, starfield, big clock or your own GIF) and an intro when the dock connects.
+- **Dock:** screen brightness, the M18's light ring (one colour, or paint it light by light), start with Windows, a screen saver (Matrix rain, the Agora temple, starfield, big clock or your own GIF), an intro when the dock connects, and your own boot logo on the M18.
 - **Intro:** the Agora temple builds itself when the app opens, or play your own video.
 - **Open keys** take the app's own icon.
 - **VSD Craft import:** brings in your M18 profiles from VSD Craft. Agora only reads VSD Craft's files and never changes them.
